@@ -8,6 +8,33 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from data_provider import StockDataProvider
 from logger_config import get_logger
+from config import (
+    # Trend & Structure
+    SMA_50_PERIOD, SMA_150_PERIOD, SMA_200_PERIOD, MIN_DATA_DAYS,
+    SMA_SLOPE_LOOKBACK_DAYS, SMA_SLOPE_LOOKBACK_SHORT,
+    PRICE_FROM_52W_LOW_MIN_PCT, PRICE_FROM_52W_HIGH_MAX_PCT, PRICE_TOO_CLOSE_TO_HIGH_PCT,
+    # Base Quality
+    BASE_LENGTH_MIN_WEEKS, BASE_LENGTH_MAX_WEEKS, BASE_DEPTH_MAX_PCT,
+    BASE_DEPTH_WARNING_PCT, BASE_DEPTH_ELITE_PCT, BASE_VOLATILITY_MULTIPLIER,
+    CLOSE_POSITION_MIN_PCT, VOLUME_CONTRACTION_WARNING_BASE, BASE_LOOKBACK_DAYS,
+    # Base Identification
+    VOLATILITY_WINDOW, LOW_VOL_THRESHOLD_MULTIPLIER, LOW_VOL_MIN_DAYS,
+    LOW_VOL_PERCENTAGE_THRESHOLD, LOW_VOL_MIN_DAYS_FOR_PCT,
+    BASE_LENGTH_MIN_WEEKS_IDENTIFY, BASE_LENGTH_MAX_WEEKS_IDENTIFY, BASE_DEPTH_MAX_PCT_IDENTIFY,
+    RANGE_30D_THRESHOLD_PCT, RANGE_60D_THRESHOLD_PCT, ADVANCE_DECLINE_THRESHOLD_PCT,
+    # Relative Strength
+    RSI_PERIOD, RSI_MIN_THRESHOLD, RS_LINE_DECLINE_WARNING_PCT, RS_LINE_DECLINE_FAIL_PCT,
+    RS_LOOKBACK_DAYS, RS_TREND_LOOKBACK_DAYS,
+    # Volume Signature
+    VOLUME_CONTRACTION_WARNING, BREAKOUT_VOLUME_MULTIPLIER, HEAVY_SELL_VOLUME_MULTIPLIER,
+    RECENT_DAYS_FOR_VOLUME, AVG_VOLUME_LOOKBACK_DAYS,
+    # Breakout Rules
+    PIVOT_CLEARANCE_PCT, BREAKOUT_LOOKBACK_DAYS, CLOSE_POSITION_MIN_PCT_BREAKOUT, VOLUME_EXPANSION_MIN,
+    # Buy/Sell Prices
+    STOP_LOSS_PCT, PROFIT_TARGET_1_PCT, PROFIT_TARGET_2_PCT, BUY_PRICE_BUFFER_PCT,
+    # Grading
+    MAX_FAILURES_FOR_A, MAX_FAILURES_FOR_B, CRITICAL_FAILURE_GRADE
+)
 
 logger = get_logger(__name__)
 
@@ -61,20 +88,25 @@ class MinerviniScanner:
             # Get stock info for fundamentals
             stock_info = self.data_provider.get_stock_info(ticker)
             
+            # Identify base ONCE (performance optimization)
+            lookback_days = min(60, len(hist))
+            recent_data = hist.tail(lookback_days)
+            base_info = self._identify_base(recent_data)
+            
             # PART 1: Trend & Structure (NON-NEGOTIABLE)
             trend_results = self._check_trend_structure(hist, stock_info)
             
-            # PART 2: Base Quality
-            base_results = self._check_base_quality(hist)
+            # PART 2: Base Quality (pass base_info)
+            base_results = self._check_base_quality(hist, base_info)
             
-            # PART 3: Relative Strength
-            rs_results = self._check_relative_strength(ticker, hist)
+            # PART 3: Relative Strength (pass base_info)
+            rs_results = self._check_relative_strength(ticker, hist, base_info)
             
-            # PART 4: Volume Signature
-            volume_results = self._check_volume_signature(hist)
+            # PART 4: Volume Signature (pass base_info)
+            volume_results = self._check_volume_signature(hist, base_info)
             
-            # PART 5: Breakout Day Rules
-            breakout_results = self._check_breakout_rules(hist)
+            # PART 5: Breakout Day Rules (pass base_info)
+            breakout_results = self._check_breakout_rules(hist, base_info)
             
             # Combine all results
             checklist = {
@@ -88,12 +120,16 @@ class MinerviniScanner:
             # Calculate overall grade
             grade_result = self._calculate_grade(checklist)
             
+            # Calculate buy/sell prices (entry/exit points)
+            buy_sell_prices = self._calculate_buy_sell_prices(hist, base_info, checklist)
+            
             return {
                 "ticker": ticker,
                 "overall_grade": grade_result["grade"],
                 "meets_criteria": grade_result["meets_criteria"],
                 "position_size": grade_result["position_size"],
                 "checklist": checklist,
+                "buy_sell_prices": buy_sell_prices,
                 "detailed_analysis": {
                     "current_price": float(hist['Close'].iloc[-1]),
                     "52_week_high": float(hist['High'].tail(252).max()) if len(hist) >= 252 else float(hist['High'].max()),
@@ -134,14 +170,14 @@ class MinerviniScanner:
             current_price = hist['Close'].iloc[-1]
             
             # Calculate SMAs
-            sma_50 = hist['Close'].rolling(window=50).mean()
-            sma_150 = hist['Close'].rolling(window=150).mean()
-            sma_200 = hist['Close'].rolling(window=200).mean()
+            sma_50 = hist['Close'].rolling(window=SMA_50_PERIOD).mean()
+            sma_150 = hist['Close'].rolling(window=SMA_150_PERIOD).mean()
+            sma_200 = hist['Close'].rolling(window=SMA_200_PERIOD).mean()
             
             # Check if we have enough data
-            if len(hist) < 200:
+            if len(hist) < MIN_DATA_DAYS:
                 results["passed"] = False
-                results["failures"].append("Insufficient data for 200 SMA")
+                results["failures"].append(f"Insufficient data for {MIN_DATA_DAYS} SMA")
                 return results
             
             current_sma_50 = sma_50.iloc[-1]
@@ -168,27 +204,27 @@ class MinerviniScanner:
                 results["passed"] = False
                 results["failures"].append("SMA order incorrect (50 SMA must be > 150 SMA > 200 SMA)")
             
-            # Check SMAs sloping UP (compare current to 20 days ago)
-            if len(hist) >= 220:
-                sma_50_slope = current_sma_50 > sma_50.iloc[-20]
-                sma_150_slope = current_sma_150 > sma_150.iloc[-20]
-                sma_200_slope = current_sma_200 > sma_200.iloc[-20]
+            # Check SMAs sloping UP (compare current to configured days ago)
+            if len(hist) >= (MIN_DATA_DAYS + SMA_SLOPE_LOOKBACK_DAYS):
+                sma_50_slope = current_sma_50 > sma_50.iloc[-SMA_SLOPE_LOOKBACK_DAYS]
+                sma_150_slope = current_sma_150 > sma_150.iloc[-SMA_SLOPE_LOOKBACK_DAYS]
+                sma_200_slope = current_sma_200 > sma_200.iloc[-SMA_SLOPE_LOOKBACK_DAYS]
                 
                 if not (sma_50_slope and sma_150_slope and sma_200_slope):
                     results["passed"] = False
                     if not sma_50_slope:
-                        results["failures"].append("50 SMA not sloping up")
+                        results["failures"].append(f"{SMA_50_PERIOD} SMA not sloping up")
                     if not sma_150_slope:
-                        results["failures"].append("150 SMA not sloping up")
+                        results["failures"].append(f"{SMA_150_PERIOD} SMA not sloping up")
                     if not sma_200_slope:
-                        results["failures"].append("200 SMA not sloping up")
+                        results["failures"].append(f"{SMA_200_PERIOD} SMA not sloping up")
             else:
                 # Use shorter period if needed
-                if len(hist) >= 70:
-                    sma_50_slope = current_sma_50 > sma_50.iloc[-10]
+                if len(hist) >= (SMA_50_PERIOD + SMA_SLOPE_LOOKBACK_SHORT):
+                    sma_50_slope = current_sma_50 > sma_50.iloc[-SMA_SLOPE_LOOKBACK_SHORT]
                     if not sma_50_slope:
                         results["passed"] = False
-                        results["failures"].append("50 SMA not sloping up")
+                        results["failures"].append(f"{SMA_50_PERIOD} SMA not sloping up")
             
             # Calculate 52-week high/low
             if len(hist) >= 252:
@@ -199,18 +235,18 @@ class MinerviniScanner:
             week_52_high = year_data['High'].max()
             week_52_low = year_data['Low'].min()
             
-            # Check price ≥ 30% above 52-week low
+            # Check price above 52-week low threshold
             price_from_low_pct = ((current_price - week_52_low) / week_52_low) * 100
-            if price_from_low_pct < 30:
+            if price_from_low_pct < PRICE_FROM_52W_LOW_MIN_PCT:
                 results["passed"] = False
-                results["failures"].append(f"Price only {price_from_low_pct:.1f}% above 52W low (need ≥30%)")
+                results["failures"].append(f"Price only {price_from_low_pct:.1f}% above 52W low (need ≥{PRICE_FROM_52W_LOW_MIN_PCT}%)")
             
-            # Check price within 10–15% of 52-week high
+            # Check price within range of 52-week high
             price_from_high_pct = ((week_52_high - current_price) / week_52_high) * 100
-            if price_from_high_pct > 15:
+            if price_from_high_pct > PRICE_FROM_52W_HIGH_MAX_PCT:
                 results["passed"] = False
-                results["failures"].append(f"Price {price_from_high_pct:.1f}% below 52W high (need within 15%)")
-            elif price_from_high_pct < 10:
+                results["failures"].append(f"Price {price_from_high_pct:.1f}% below 52W high (need within {PRICE_FROM_52W_HIGH_MAX_PCT}%)")
+            elif price_from_high_pct < PRICE_TOO_CLOSE_TO_HIGH_PCT:
                 # Too close to high might indicate late stage
                 results["failures"].append(f"Price very close to 52W high ({price_from_high_pct:.1f}%) - may be late stage")
             
@@ -237,7 +273,7 @@ class MinerviniScanner:
         
         return results
     
-    def _check_base_quality(self, hist: pd.DataFrame) -> Dict:
+    def _check_base_quality(self, hist: pd.DataFrame, base_info: Optional[Dict] = None) -> Dict:
         """
         PART 2: Base Quality
         
@@ -255,13 +291,11 @@ class MinerviniScanner:
         }
         
         try:
-            # Look for base in last 60 days (about 12 weeks)
-            lookback_days = min(60, len(hist))
-            recent_data = hist.tail(lookback_days)
-            
-            # Find the most recent base (consolidation period)
-            # A base is characterized by sideways movement after an advance
-            base_info = self._identify_base(recent_data)
+            # Use provided base_info if available, otherwise identify it
+            if base_info is None:
+                lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
+                recent_data = hist.tail(lookback_days)
+                base_info = self._identify_base(recent_data)
             
             if not base_info:
                 results["passed"] = False
@@ -272,23 +306,23 @@ class MinerviniScanner:
             base_depth_pct = base_info["depth_pct"]
             base_data = base_info["data"]
             
-            # Check base length: 3-8 weeks
-            if base_length_weeks < 3 or base_length_weeks > 8:
+            # Check base length
+            if base_length_weeks < BASE_LENGTH_MIN_WEEKS or base_length_weeks > BASE_LENGTH_MAX_WEEKS:
                 results["passed"] = False
-                results["failures"].append(f"Base length {base_length_weeks:.1f} weeks (need 3-8 weeks)")
+                results["failures"].append(f"Base length {base_length_weeks:.1f} weeks (need {BASE_LENGTH_MIN_WEEKS}-{BASE_LENGTH_MAX_WEEKS} weeks)")
             
-            # Check base depth: ≤ 20-25% (≤15% is elite)
-            if base_depth_pct > 25:
+            # Check base depth
+            if base_depth_pct > BASE_DEPTH_MAX_PCT:
                 results["passed"] = False
-                results["failures"].append(f"Base depth {base_depth_pct:.1f}% (need ≤25%, ≤15% is elite)")
-            elif base_depth_pct > 20:
-                results["failures"].append(f"Base depth {base_depth_pct:.1f}% (acceptable but >20%)")
+                results["failures"].append(f"Base depth {base_depth_pct:.1f}% (need ≤{BASE_DEPTH_MAX_PCT}%, ≤{BASE_DEPTH_ELITE_PCT}% is elite)")
+            elif base_depth_pct > BASE_DEPTH_WARNING_PCT:
+                results["failures"].append(f"Base depth {base_depth_pct:.1f}% (acceptable but >{BASE_DEPTH_WARNING_PCT}%)")
             
             # Check for wide, sloppy candles (high volatility)
             base_volatility = base_data['Close'].pct_change().std()
             avg_volatility = hist['Close'].pct_change().tail(252).std()
             
-            if base_volatility > avg_volatility * 1.5:
+            if base_volatility > avg_volatility * BASE_VOLATILITY_MULTIPLIER:
                 results["passed"] = False
                 results["failures"].append("Base shows high volatility (wide, sloppy candles)")
             
@@ -298,16 +332,18 @@ class MinerviniScanner:
                                       (base_data['High'] - base_data['Low'])) * 100
             avg_close_position = base_data['range_pct'].mean()
             
-            if avg_close_position < 60:  # Closes should be in top 40% of range
+            if avg_close_position < CLOSE_POSITION_MIN_PCT:
                 results["passed"] = False
                 results["failures"].append(f"Closes not near highs (avg {avg_close_position:.1f}% of range)")
             
             # Check volume contracts inside base
+            lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
             base_volume = base_data['Volume'].mean()
-            pre_base_volume = hist.iloc[-(lookback_days + 20):-lookback_days]['Volume'].mean()
+            pre_base_volume = hist.iloc[-(lookback_days + 20):-lookback_days]['Volume'].mean() if len(hist) > (lookback_days + 20) else base_volume
             
-            if base_volume > pre_base_volume * 0.9:  # Volume should contract
-                results["failures"].append("Volume not contracting in base (should be <90% of pre-base)")
+            # Make this a warning only, not a failure (volume can be slightly higher)
+            if pre_base_volume > 0 and base_volume > pre_base_volume * VOLUME_CONTRACTION_WARNING_BASE:
+                results["failures"].append(f"Volume not contracting in base (should be <{VOLUME_CONTRACTION_WARNING_BASE*100:.0f}% of pre-base)")
             
             # Store details
             results["details"] = {
@@ -343,52 +379,33 @@ class MinerviniScanner:
             # A base typically follows an advance and shows 3-8 weeks of consolidation
             
             # Method 1: Look for low volatility periods (improved method)
-            window = 10  # ~2 weeks
+            window = VOLATILITY_WINDOW  # ~2 weeks
             data = data.copy()  # Avoid SettingWithCopyWarning
             data['volatility'] = data['Close'].pct_change().rolling(window=window).std()
             
             # Find periods with low volatility (potential bases)
-            # Improved: Use 0.75 threshold instead of 0.7 (more lenient)
             avg_volatility = data['volatility'].mean()
-            low_vol_periods = data[data['volatility'] < avg_volatility * 0.75]
+            low_vol_threshold = avg_volatility * LOW_VOL_THRESHOLD_MULTIPLIER
+            low_vol_periods = data[data['volatility'] < low_vol_threshold]
             
-            # Improved: Check for 10 consecutive days OR 60% of recent days
-            # Option 1: Consecutive days (reduced from 15 to 10)
-            if len(low_vol_periods) >= 10:  # Need at least 2 weeks of data
-                # Get the most recent low volatility period
-                base_start_idx = low_vol_periods.index[0]
-                base_end_idx = data.index[-1]
-                
-                # Extend base backwards to find the start of consolidation
-                base_data = data.loc[base_start_idx:base_end_idx]
-                
-                # Calculate base metrics
-                base_high = base_data['High'].max()
-                base_low = base_data['Low'].min()
-                base_depth_pct = ((base_high - base_low) / base_high) * 100
-                
-                # Calculate length in weeks (assuming ~5 trading days per week)
-                base_length_days = len(base_data)
-                base_length_weeks = base_length_days / 5.0
-                
-                # Only return if it looks like a valid base (2-12 weeks, reasonable depth)
-                if 2 <= base_length_weeks <= 12 and base_depth_pct <= 35:
-                    return {
-                        "data": base_data,
-                        "length_weeks": base_length_weeks,
-                        "depth_pct": base_depth_pct,
-                        "start_date": base_start_idx,
-                        "end_date": base_end_idx
-                    }
+            # IMPROVED: Check for advance before base (key Minervini rule)
+            # A base should follow an advance - price should have been higher before
+            if len(data) >= 40:
+                price_40d_ago = data['Close'].iloc[-40] if len(data) >= 40 else data['Close'].iloc[0]
+                current_price = data['Close'].iloc[-1]
+                # Base should follow an advance (price was higher before, or at least not much lower)
+                # Allow up to 5% decline (normal consolidation), reject if >10% decline
+                if current_price < price_40d_ago * 0.90:  # Price declined >10% = likely a decline, not a base
+                    # This might be a decline, not a base after advance
+                    pass  # Continue checking, but this is less likely to be a valid base
             
-            # Option 2: Percentage-based approach (fallback if consecutive fails)
-            # Check if 60% of recent days are low volatility
+            # Use percentage-based approach as PRIMARY method
             if len(data) >= 20:
                 recent_data = data.tail(20)
-                recent_low_vol = recent_data[recent_data['volatility'] < avg_volatility * 0.75]
+                recent_low_vol = recent_data[recent_data['volatility'] < low_vol_threshold]
                 low_vol_percentage = len(recent_low_vol) / len(recent_data) if len(recent_data) > 0 else 0
                 
-                if low_vol_percentage >= 0.60 and len(recent_data) >= 15:  # 60% of days, at least 15 days
+                if low_vol_percentage >= LOW_VOL_PERCENTAGE_THRESHOLD and len(recent_data) >= LOW_VOL_MIN_DAYS_FOR_PCT:
                     # Use recent data as base
                     base_data = recent_data
                     base_high = base_data['High'].max()
@@ -397,7 +414,7 @@ class MinerviniScanner:
                     base_length_weeks = len(base_data) / 5.0
                     
                     # Only return if it looks like a valid base
-                    if 2 <= base_length_weeks <= 12 and base_depth_pct <= 35:
+                    if BASE_LENGTH_MIN_WEEKS_IDENTIFY <= base_length_weeks <= BASE_LENGTH_MAX_WEEKS_IDENTIFY and base_depth_pct <= BASE_DEPTH_MAX_PCT_IDENTIFY:
                         return {
                             "data": base_data,
                             "length_weeks": base_length_weeks,
@@ -406,7 +423,7 @@ class MinerviniScanner:
                             "end_date": base_data.index[-1]
                         }
             
-            # Method 2: Look for recent consolidation using price range
+            # Fallback Method: Look for recent consolidation using price range
             # Check last 30-60 days for sideways movement
             if len(data) >= 30:
                 # Look at last 30-60 days
@@ -420,15 +437,15 @@ class MinerviniScanner:
                             recent_60d['Close'].mean()) * 100
                 
                 # If recent range is relatively small (consolidation), use it as base
-                if range_30d <= 15 or (range_60d <= 25 and len(data) >= 40):
-                    base_data = recent_30d if range_30d <= 15 else recent_60d
+                if range_30d <= RANGE_30D_THRESHOLD_PCT or (range_60d <= RANGE_60D_THRESHOLD_PCT and len(data) >= 40):
+                    base_data = recent_30d if range_30d <= RANGE_30D_THRESHOLD_PCT else recent_60d
                     base_high = base_data['High'].max()
                     base_low = base_data['Low'].min()
                     base_depth_pct = ((base_high - base_low) / base_high) * 100
                     base_length_weeks = len(base_data) / 5.0
                     
                     # Only return if reasonable
-                    if 2 <= base_length_weeks <= 12 and base_depth_pct <= 35:
+                    if BASE_LENGTH_MIN_WEEKS_IDENTIFY <= base_length_weeks <= BASE_LENGTH_MAX_WEEKS_IDENTIFY and base_depth_pct <= BASE_DEPTH_MAX_PCT_IDENTIFY:
                         return {
                             "data": base_data,
                             "length_weeks": base_length_weeks,
@@ -444,7 +461,7 @@ class MinerviniScanner:
             logger.debug(f"Error identifying base: {e}")
             return None
     
-    def _check_relative_strength(self, ticker: str, hist: pd.DataFrame) -> Dict:
+    def _check_relative_strength(self, ticker: str, hist: pd.DataFrame, base_info: Optional[Dict] = None) -> Dict:
         """
         PART 3: Relative Strength (CRITICAL)
         
@@ -460,13 +477,28 @@ class MinerviniScanner:
         }
         
         try:
-            # Calculate RSI(14)
-            rsi = self._calculate_rsi(hist['Close'], period=14)
+            # Calculate RSI
+            rsi = self._calculate_rsi(hist['Close'], period=RSI_PERIOD)
             current_rsi = rsi.iloc[-1] if not rsi.empty else 0
             
-            if current_rsi < 60:
+            # Check RSI at base start if base exists (Minervini says "before breakout")
+            rsi_to_check = current_rsi
+            if base_info and "start_date" in base_info:
+                base_start = base_info["start_date"]
+                if base_start in rsi.index:
+                    rsi_to_check = rsi.loc[base_start]
+                elif base_start in hist.index:
+                    # Calculate RSI at base start if not in series
+                    base_start_idx = hist.index.get_loc(base_start) if base_start in hist.index else len(hist) - 1
+                    if base_start_idx < len(rsi):
+                        rsi_to_check = rsi.iloc[base_start_idx]
+            
+            if rsi_to_check < RSI_MIN_THRESHOLD:
                 results["passed"] = False
-                results["failures"].append(f"RSI(14) = {current_rsi:.1f} (need >60)")
+                if base_info:
+                    results["failures"].append(f"RSI({RSI_PERIOD}) at base start = {rsi_to_check:.1f} (need >{RSI_MIN_THRESHOLD})")
+                else:
+                    results["failures"].append(f"RSI({RSI_PERIOD}) = {rsi_to_check:.1f} (need >{RSI_MIN_THRESHOLD})")
             
             # Calculate relative strength vs benchmark
             rs_data = self.data_provider.calculate_relative_strength(ticker, self.benchmark, period=252)
@@ -481,9 +513,9 @@ class MinerviniScanner:
                     
                     # Align dates
                     common_dates = stock_returns.index.intersection(bench_returns.index)
-                    if len(common_dates) >= 60:
-                        stock_period = stock_returns.loc[common_dates[-60:]]
-                        bench_period = bench_returns.loc[common_dates[-60:]]
+                    if len(common_dates) >= RS_LOOKBACK_DAYS:
+                        stock_period = stock_returns.loc[common_dates[-RS_LOOKBACK_DAYS:]]
+                        bench_period = bench_returns.loc[common_dates[-RS_LOOKBACK_DAYS:]]
                         
                         stock_cumulative = (1 + stock_period).prod() - 1
                         bench_cumulative = (1 + bench_period).prod() - 1
@@ -517,7 +549,7 @@ class MinerviniScanner:
             if not benchmark_hist.empty:
                 # Align dates
                 common_dates = hist.index.intersection(benchmark_hist.index)
-                if len(common_dates) >= 60:
+                if len(common_dates) >= RS_LOOKBACK_DAYS:
                     aligned_stock = hist.loc[common_dates]['Close']
                     aligned_bench = benchmark_hist.loc[common_dates]['Close']
                     
@@ -525,11 +557,21 @@ class MinerviniScanner:
                     rs_line_normalized = (rs_line / rs_line.iloc[0]) * 100  # Normalize to start at 100
                     
                     current_rs = rs_line_normalized.iloc[-1]
-                    rs_high = rs_line_normalized.tail(60).max()
+                    rs_high = rs_line_normalized.tail(RS_LOOKBACK_DAYS).max()
                     rs_from_high_pct = ((rs_high - current_rs) / rs_high) * 100
                     
-                    if rs_from_high_pct > 5:  # More than 5% below RS high
-                        results["failures"].append(f"RS line {rs_from_high_pct:.1f}% below recent high")
+                    # Check if RS line is trending up, not just absolute value
+                    rs_trend_lookback = RS_TREND_LOOKBACK_DAYS if len(rs_line_normalized) >= RS_TREND_LOOKBACK_DAYS else len(rs_line_normalized) - 1
+                    rs_trend_ago = rs_line_normalized.iloc[-rs_trend_lookback] if rs_trend_lookback > 0 else rs_line_normalized.iloc[0]
+                    rs_trending_up = current_rs > rs_trend_ago
+                    
+                    if rs_from_high_pct > RS_LINE_DECLINE_WARNING_PCT:
+                        if not rs_trending_up and rs_from_high_pct > RS_LINE_DECLINE_FAIL_PCT:
+                            # RS line declining significantly
+                            results["failures"].append(f"RS line declining ({rs_from_high_pct:.1f}% below recent high)")
+                        else:
+                            # RS line near high but not trending up
+                            results["failures"].append(f"RS line {rs_from_high_pct:.1f}% below recent high")
             
             # Store details
             results["details"] = {
@@ -559,7 +601,7 @@ class MinerviniScanner:
         
         return rsi
     
-    def _check_volume_signature(self, hist: pd.DataFrame) -> Dict:
+    def _check_volume_signature(self, hist: pd.DataFrame, base_info: Optional[Dict] = None) -> Dict:
         """
         PART 4: Volume Signature
         
@@ -575,10 +617,11 @@ class MinerviniScanner:
         }
         
         try:
-            # Get base data (reuse from base quality check)
-            lookback_days = min(60, len(hist))
-            recent_data = hist.tail(lookback_days)
-            base_info = self._identify_base(recent_data)
+            # Use provided base_info if available, otherwise identify it
+            if base_info is None:
+                lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
+                recent_data = hist.tail(lookback_days)
+                base_info = self._identify_base(recent_data)
             
             if not base_info:
                 results["passed"] = False
@@ -587,37 +630,50 @@ class MinerviniScanner:
             
             base_data = base_info["data"]
             
+            # Calculate lookback_days if not already set (when base_info is provided)
+            if 'lookback_days' not in locals():
+                if base_info and "start_date" in base_info:
+                    # Estimate lookback from base start
+                    base_start = base_info["start_date"]
+                    if base_start in hist.index:
+                        base_start_idx = hist.index.get_loc(base_start)
+                        lookback_days = len(hist) - base_start_idx + AVG_VOLUME_LOOKBACK_DAYS  # Add buffer
+                    else:
+                        lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
+                else:
+                    lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
+            
             # Check for dry volume in base
             base_avg_volume = base_data['Volume'].mean()
-            pre_base_volume = hist.iloc[-(lookback_days + 20):-lookback_days]['Volume'].mean()
+            pre_base_volume = hist.iloc[-(lookback_days + AVG_VOLUME_LOOKBACK_DAYS):-lookback_days]['Volume'].mean() if len(hist) > (lookback_days + AVG_VOLUME_LOOKBACK_DAYS) else base_avg_volume
             
             volume_contraction = base_avg_volume / pre_base_volume if pre_base_volume > 0 else 1.0
             
-            if volume_contraction > 0.9:
+            if volume_contraction > VOLUME_CONTRACTION_WARNING:
                 results["failures"].append(f"Volume not dry in base (contraction: {volume_contraction:.2f}x)")
             
-            # Check for breakout volume (last 5 days)
-            recent_5_days = hist.tail(5)
-            recent_volume = recent_5_days['Volume'].mean()
+            # Check for breakout volume
+            recent_days = hist.tail(RECENT_DAYS_FOR_VOLUME)
+            recent_volume = recent_days['Volume'].mean()
             
             # Check if we're in a breakout (price breaking above base high)
             base_high = base_data['High'].max()
             current_price = hist['Close'].iloc[-1]
             
-            if current_price > base_high * 1.02:  # 2% above base high = breakout
-                # Check if volume is +40% above average
-                avg_volume_20d = hist.tail(20)['Volume'].mean()
-                volume_increase = recent_volume / avg_volume_20d if avg_volume_20d > 0 else 0
+            if current_price > base_high * (1 + BUY_PRICE_BUFFER_PCT / 100):  # % above base high = breakout
+                # Check if volume is above threshold
+                avg_volume = hist.tail(AVG_VOLUME_LOOKBACK_DAYS)['Volume'].mean()
+                volume_increase = recent_volume / avg_volume if avg_volume > 0 else 0
                 
-                if volume_increase < 1.4:
+                if volume_increase < BREAKOUT_VOLUME_MULTIPLIER:
                     results["passed"] = False
-                    results["failures"].append(f"Breakout volume only {volume_increase:.2f}x (need ≥1.4x)")
+                    results["failures"].append(f"Breakout volume only {volume_increase:.2f}x (need ≥{BREAKOUT_VOLUME_MULTIPLIER}x)")
             else:
                 # Not in breakout yet, just check for heavy sell volume
-                down_days = recent_5_days[recent_5_days['Close'] < recent_5_days['Open']]
+                down_days = recent_days[recent_days['Close'] < recent_days['Open']]
                 if len(down_days) > 0:
                     down_volume = down_days['Volume'].mean()
-                    if down_volume > base_avg_volume * 1.5:
+                    if down_volume > base_avg_volume * HEAVY_SELL_VOLUME_MULTIPLIER:
                         results["failures"].append("Heavy sell volume detected before breakout")
             
             # Store details
@@ -638,7 +694,7 @@ class MinerviniScanner:
         
         return results
     
-    def _check_breakout_rules(self, hist: pd.DataFrame) -> Dict:
+    def _check_breakout_rules(self, hist: pd.DataFrame, base_info: Optional[Dict] = None) -> Dict:
         """
         PART 5: Breakout Day Rules
         
@@ -655,10 +711,11 @@ class MinerviniScanner:
         }
         
         try:
-            # Find pivot point (base high)
-            lookback_days = min(60, len(hist))
-            recent_data = hist.tail(lookback_days)
-            base_info = self._identify_base(recent_data)
+            # Use provided base_info if available, otherwise identify it
+            if base_info is None:
+                lookback_days = min(BASE_LOOKBACK_DAYS, len(hist))
+                recent_data = hist.tail(lookback_days)
+                base_info = self._identify_base(recent_data)
             
             if not base_info:
                 results["passed"] = False
@@ -667,40 +724,69 @@ class MinerviniScanner:
             
             base_high = base_info["data"]['High'].max()
             current_price = hist['Close'].iloc[-1]
-            current_high = hist['High'].iloc[-1]
-            current_low = hist['Low'].iloc[-1]
-            current_volume = hist['Volume'].iloc[-1]
-            avg_volume = hist.tail(20)['Volume'].mean()
             
-            # Check if clearing pivot decisively (at least 2% above base high)
-            if current_price < base_high * 1.02:
+            # Check last N days for breakout conditions (not just current day)
+            recent_days = hist.tail(BREAKOUT_LOOKBACK_DAYS)
+            cleared_pivot = False
+            breakout_day_idx = None
+            breakout_day = None
+            
+            # Check if any day in last N days cleared pivot
+            pivot_clearance = base_high * (1 + PIVOT_CLEARANCE_PCT / 100)
+            for i in range(len(recent_days)):
+                day_price = recent_days['Close'].iloc[i]
+                if day_price >= pivot_clearance:
+                    cleared_pivot = True
+                    breakout_day_idx = i
+                    breakout_day = recent_days.iloc[i]
+                    break
+            
+            if not cleared_pivot:
                 results["passed"] = False
-                results["failures"].append(f"Price not clearing pivot decisively (need ≥2% above base high)")
+                results["failures"].append(f"Price not clearing pivot decisively (need ≥{PIVOT_CLEARANCE_PCT}% above base high in last {BREAKOUT_LOOKBACK_DAYS} days)")
+                # Store details even if no breakout
+                results["details"] = {
+                    "pivot_price": float(base_high),
+                    "current_price": float(current_price),
+                    "clears_pivot": False,
+                    "close_position_pct": 0,
+                    "volume_ratio": 0,
+                    "in_breakout": False
+                }
+                return results
             
-            # Check if closes in top 25% of range
-            daily_range = current_high - current_low
+            # Check breakout day specifically
+            breakout_price = breakout_day['Close']
+            breakout_high = breakout_day['High']
+            breakout_low = breakout_day['Low']
+            breakout_volume = breakout_day['Volume']
+            
+            # Check close position on breakout day
+            daily_range = breakout_high - breakout_low
+            close_position = 0
             if daily_range > 0:
-                close_position = ((current_price - current_low) / daily_range) * 100
-                if close_position < 75:  # Not in top 25%
-                    results["passed"] = False
-                    results["failures"].append(f"Close not in top 25% of range (at {close_position:.1f}%)")
+                close_position = ((breakout_price - breakout_low) / daily_range) * 100
+                if close_position < CLOSE_POSITION_MIN_PCT_BREAKOUT:
+                    results["failures"].append(f"Close not in top {100-CLOSE_POSITION_MIN_PCT_BREAKOUT}% of range on breakout day (at {close_position:.1f}%)")
             else:
-                results["failures"].append("Zero daily range (no price movement)")
+                results["failures"].append("Zero daily range on breakout day")
             
-            # Check volume expansion
-            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
-            if volume_ratio < 1.4:
+            # Check volume on breakout day
+            avg_volume = hist.tail(AVG_VOLUME_LOOKBACK_DAYS)['Volume'].mean()
+            volume_ratio = breakout_volume / avg_volume if avg_volume > 0 else 0
+            if volume_ratio < VOLUME_EXPANSION_MIN:
                 results["passed"] = False
-                results["failures"].append(f"Volume expansion insufficient ({volume_ratio:.2f}x, need ≥1.4x)")
+                results["failures"].append(f"Volume expansion insufficient ({volume_ratio:.2f}x, need ≥{VOLUME_EXPANSION_MIN}x)")
             
             # Store details
             results["details"] = {
                 "pivot_price": float(base_high),
                 "current_price": float(current_price),
-                "clears_pivot": current_price >= base_high * 1.02,
-                "close_position_pct": float(close_position) if daily_range > 0 else 0,
+                "breakout_day_price": float(breakout_price),
+                "clears_pivot": True,
+                "close_position_pct": float(close_position),
                 "volume_ratio": float(volume_ratio),
-                "in_breakout": current_price >= base_high * 1.02
+                "in_breakout": True
             }
             
         except Exception as e:
@@ -735,18 +821,18 @@ class MinerviniScanner:
         
         # Calculate grade
         if critical_failures > 0:
-            grade = "F"
+            grade = CRITICAL_FAILURE_GRADE
             meets_criteria = False
             position_size = "None"
         elif total_failures == 0:
             grade = "A+"
             meets_criteria = True
             position_size = "Full"
-        elif total_failures <= 2:
+        elif total_failures <= MAX_FAILURES_FOR_A:
             grade = "A"
             meets_criteria = True
             position_size = "Half"
-        elif total_failures <= 4:
+        elif total_failures <= MAX_FAILURES_FOR_B:
             grade = "B"
             meets_criteria = False
             position_size = "Half"
@@ -773,6 +859,87 @@ class MinerviniScanner:
             "price_from_52w_high_pct": price_from_52w_high_pct,
             "price_from_52w_low_pct": price_from_52w_low_pct
         }
+    
+    def _calculate_buy_sell_prices(self, hist: pd.DataFrame, base_info: Optional[Dict], checklist: Dict) -> Dict:
+        """
+        Calculate buy and sell prices based on Minervini methodology
+        
+        Buy Price: Pivot point (base high) - this is the entry point
+        Stop Loss: 7-8% below buy price (Minervini's rule)
+        Profit Target 1: 20-25% above buy price (take partial profits)
+        Profit Target 2: 40-50% above buy price (let winners run, trail stop)
+        
+        Returns:
+            Dictionary with buy_price, stop_loss, profit_target_1, profit_target_2
+        """
+        current_price = float(hist['Close'].iloc[-1])
+        buy_price = current_price
+        pivot_price = None
+        stop_loss = None
+        profit_target_1 = None
+        profit_target_2 = None
+        risk_reward_ratio = None
+        
+        try:
+            # Get pivot price (base high) if base exists
+            if base_info and "data" in base_info:
+                pivot_price = float(base_info["data"]['High'].max())
+                
+                # Buy price is the pivot point (base high) - this is Minervini's entry point
+                # If already above pivot, use pivot price (ideal entry) or current if significantly above
+                if current_price >= pivot_price * (1 + BUY_PRICE_BUFFER_PCT / 100):
+                    # Already in breakout - buy at pivot (ideal) or slightly below current
+                    buy_price = pivot_price  # Always use pivot as buy price
+                else:
+                    # Not yet in breakout - buy at pivot point when it breaks out
+                    buy_price = pivot_price
+            
+            # Calculate stop loss: below buy price (Minervini's rule)
+            stop_loss = buy_price * (1 - STOP_LOSS_PCT / 100)
+            
+            # Profit Target 1: above buy price (take partial profits)
+            profit_target_1 = buy_price * (1 + PROFIT_TARGET_1_PCT / 100)
+            
+            # Profit Target 2: above buy price (let winners run, then trail stop)
+            profit_target_2 = buy_price * (1 + PROFIT_TARGET_2_PCT / 100)
+            
+            # Calculate risk/reward ratio
+            risk = buy_price - stop_loss
+            reward = profit_target_1 - buy_price
+            if risk > 0:
+                risk_reward_ratio = reward / risk
+            
+            # Calculate distance from current price to buy price
+            distance_to_buy_pct = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0
+            
+            return {
+                "pivot_price": pivot_price,
+                "buy_price": float(buy_price),
+                "current_price": float(current_price),
+                "distance_to_buy_pct": float(distance_to_buy_pct),
+                "stop_loss": float(stop_loss),
+                "stop_loss_pct": float(STOP_LOSS_PCT),
+                "profit_target_1": float(profit_target_1),
+                "profit_target_1_pct": float(PROFIT_TARGET_1_PCT),
+                "profit_target_2": float(profit_target_2),
+                "profit_target_2_pct": float(PROFIT_TARGET_2_PCT),
+                "risk_reward_ratio": float(risk_reward_ratio) if risk_reward_ratio else None,
+                "risk_per_share": float(buy_price - stop_loss),
+                "potential_profit_1": float(profit_target_1 - buy_price),
+                "potential_profit_2": float(profit_target_2 - buy_price),
+                "in_breakout": current_price >= buy_price * (1 + BUY_PRICE_BUFFER_PCT / 100) if pivot_price else False
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating buy/sell prices: {e}", exc_info=True)
+            return {
+                "pivot_price": None,
+                "buy_price": float(current_price),
+                "current_price": float(current_price),
+                "distance_to_buy_pct": 0,
+                "stop_loss": None,
+                "error": str(e)
+            }
     
     def scan_multiple(self, tickers: List[str]) -> List[Dict]:
         """

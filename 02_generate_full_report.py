@@ -196,6 +196,11 @@ def scan_all_stocks_from_cache(cached_data: Dict, benchmark: str = "^GDAXI", sin
                 if "stock_info" not in result:
                     result["stock_info"] = {}
                 result["stock_info"]["company_name"] = company_name
+            
+            # Add data timestamp from cached data
+            result["data_timestamp"] = cached_stock.get("fetched_at")
+            result["data_date_range"] = cached_stock.get("date_range", {})
+            
             grade = result.get("overall_grade", "F")
             meets = "✓" if result.get("meets_criteria", False) else "✗"
             print(f"{meets} Grade: {grade}")
@@ -252,8 +257,37 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
     lines.append("=" * 100)
     lines.append("MINERVINI SEPA SCAN - SUMMARY REPORT")
     lines.append("=" * 100)
-    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
+    
+    # Data Freshness Information
+    data_timestamps = [r.get("data_timestamp") for r in results if r.get("data_timestamp")]
+    if data_timestamps:
+        # Find oldest and newest data timestamps
+        try:
+            from datetime import datetime as dt
+            parsed_times = []
+            for ts in data_timestamps:
+                try:
+                    if 'T' in ts:
+                        dt_str = ts.split('T')[0] + ' ' + ts.split('T')[1].split('.')[0].split('+')[0]
+                        parsed_times.append(dt.strptime(dt_str[:19], '%Y-%m-%d %H:%M:%S'))
+                except:
+                    pass
+            
+            if parsed_times:
+                oldest_data = min(parsed_times)
+                newest_data = max(parsed_times)
+                lines.append("📅 DATA FRESHNESS")
+                lines.append("-" * 100)
+                lines.append(f"  Oldest Data: {oldest_data.strftime('%Y-%m-%d %H:%M:%S')}")
+                lines.append(f"  Newest Data: {newest_data.strftime('%Y-%m-%d %H:%M:%S')}")
+                if (datetime.now() - newest_data.replace(tzinfo=None)).days > 1:
+                    days_old = (datetime.now() - newest_data.replace(tzinfo=None)).days
+                    lines.append(f"  ⚠️  Warning: Data is {days_old} day(s) old - consider refreshing")
+                lines.append("")
+        except:
+            pass
     
     # Overall Statistics
     lines.append("📊 OVERALL STATISTICS")
@@ -334,14 +368,46 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
         )
         
         lines.append(f"\n{grade} Grade ({len(stocks_sorted)} stocks):")
-        for i, stock in enumerate(stocks_sorted[:10], 1):  # Top 10 per grade
+        # Show all stocks for A+ and A grades, top 10 for others
+        max_stocks = len(stocks_sorted) if grade in ["A+", "A"] else 10
+        for i, stock in enumerate(stocks_sorted[:max_stocks], 1):
             ticker = stock.get("ticker", "UNKNOWN")
             company_name = get_company_name(stock)
             price_pct = stock.get("detailed_analysis", {}).get("price_from_52w_high_pct", 0)
+            buy_sell = stock.get("buy_sell_prices", {})
+            data_timestamp = stock.get("data_timestamp")
+            
+            # Format company name
             if company_name and company_name != "N/A":
-                lines.append(f"  {i:2d}. {ticker:12s} ({company_name[:50]}) - {price_pct:.1f}% from 52W high")
+                name_part = f"{ticker:12s} ({company_name[:40]})"
             else:
-                lines.append(f"  {i:2d}. {ticker:12s} - {price_pct:.1f}% from 52W high")
+                name_part = f"{ticker:12s}"
+            
+            # Add price info
+            price_info = f"{price_pct:.1f}% from 52W high"
+            
+            # Format timestamp if available
+            timestamp_str = ""
+            if data_timestamp:
+                try:
+                    # Handle ISO format timestamp
+                    if 'T' in data_timestamp:
+                        dt_str = data_timestamp.split('T')[0] + ' ' + data_timestamp.split('T')[1].split('.')[0].split('+')[0]
+                        timestamp_str = f" | Data: {dt_str[:16]}"  # YYYY-MM-DD HH:MM
+                    else:
+                        timestamp_str = f" | Data: {data_timestamp[:16]}" if len(data_timestamp) > 16 else f" | Data: {data_timestamp}"
+                except:
+                    timestamp_str = f" | Data: {data_timestamp[:16]}" if len(data_timestamp) > 16 else f" | Data: {data_timestamp}"
+            
+            # Add buy/sell prices if available
+            if buy_sell and buy_sell.get("pivot_price") is not None:
+                buy_price = buy_sell.get("buy_price", 0)
+                stop_loss = buy_sell.get("stop_loss", 0)
+                profit_target_1 = buy_sell.get("profit_target_1", 0)
+                lines.append(f"  {i:2d}. {name_part} - {price_info}{timestamp_str}")
+                lines.append(f"      Buy: ${buy_price:.2f} | Stop: ${stop_loss:.2f} | Target 1: ${profit_target_1:.2f}")
+            else:
+                lines.append(f"  {i:2d}. {name_part} - {price_info}{timestamp_str}")
     
     lines.append("")
     lines.append("=" * 100)
@@ -418,15 +484,74 @@ def generate_detailed_report(results: List[Dict], output_file: Optional[Path] = 
             lines.append("=" * 100)
             lines.append("")
             
+            # Data timestamp
+            data_timestamp = stock.get("data_timestamp")
+            data_date_range = stock.get("data_date_range", {})
+            if data_timestamp:
+                try:
+                    # Handle ISO format timestamp
+                    if 'T' in data_timestamp:
+                        dt_str = data_timestamp.split('T')[0] + ' ' + data_timestamp.split('T')[1].split('.')[0].split('+')[0]
+                        timestamp_str = dt_str[:19]  # YYYY-MM-DD HH:MM:SS
+                    else:
+                        timestamp_str = data_timestamp
+                except:
+                    timestamp_str = data_timestamp
+                
+                lines.append("[DATA TIMESTAMP]")
+                lines.append(f"  Data Fetched: {timestamp_str}")
+                if data_date_range:
+                    start_date = data_date_range.get('start', 'N/A')
+                    end_date = data_date_range.get('end', 'N/A')
+                    # Format dates (remove timezone info if present)
+                    if start_date != 'N/A' and 'T' in str(start_date):
+                        start_date = str(start_date).split('T')[0]
+                    if end_date != 'N/A' and 'T' in str(end_date):
+                        end_date = str(end_date).split('T')[0]
+                    lines.append(f"  Data Range: {start_date} to {end_date}")
+                lines.append("")
+            
             # Price info
             detailed = stock.get("detailed_analysis", {})
             if detailed:
+                # Get last trading date from data range
+                last_trade_date = "N/A"
+                if data_date_range and data_date_range.get('end'):
+                    end_date = data_date_range.get('end')
+                    if 'T' in str(end_date):
+                        last_trade_date = str(end_date).split('T')[0]
+                    else:
+                        last_trade_date = str(end_date).split()[0] if ' ' in str(end_date) else str(end_date)
+                
                 lines.append("[PRICE INFO]")
-                lines.append(f"  Current Price: ${detailed.get('current_price', 0):.2f}")
+                if last_trade_date != "N/A":
+                    lines.append(f"  Last Close Price (as of {last_trade_date}): ${detailed.get('current_price', 0):.2f}")
+                else:
+                    lines.append(f"  Last Close Price: ${detailed.get('current_price', 0):.2f}")
                 lines.append(f"  52-Week High: ${detailed.get('52_week_high', 0):.2f}")
                 lines.append(f"  52-Week Low: ${detailed.get('52_week_low', 0):.2f}")
                 lines.append(f"  From 52W High: {detailed.get('price_from_52w_high_pct', 0):.1f}%")
                 lines.append(f"  From 52W Low: {detailed.get('price_from_52w_low_pct', 0):.1f}%")
+                lines.append("")
+            
+            # Buy/Sell Prices (Entry/Exit Points)
+            buy_sell = stock.get("buy_sell_prices", {})
+            if buy_sell and buy_sell.get("pivot_price") is not None:
+                lines.append("[ENTRY/EXIT PRICES]")
+                lines.append(f"  Pivot Point (Base High): ${buy_sell.get('pivot_price', 0):.2f}")
+                lines.append(f"  Buy Price (Entry): ${buy_sell.get('buy_price', 0):.2f}")
+                if buy_sell.get('distance_to_buy_pct', 0) != 0:
+                    lines.append(f"  Distance to Buy: {buy_sell.get('distance_to_buy_pct', 0):.1f}%")
+                lines.append("")
+                lines.append(f"  Stop Loss: ${buy_sell.get('stop_loss', 0):.2f} ({buy_sell.get('stop_loss_pct', 0):.1f}% below entry)")
+                lines.append(f"  Profit Target 1: ${buy_sell.get('profit_target_1', 0):.2f} ({buy_sell.get('profit_target_1_pct', 0):.1f}% above entry) - Take Partial Profits")
+                lines.append(f"  Profit Target 2: ${buy_sell.get('profit_target_2', 0):.2f} ({buy_sell.get('profit_target_2_pct', 0):.1f}% above entry) - Let Winners Run")
+                if buy_sell.get('risk_reward_ratio'):
+                    lines.append(f"  Risk/Reward Ratio: {buy_sell.get('risk_reward_ratio', 0):.2f}:1")
+                lines.append("")
+                lines.append(f"  Risk per Share: ${buy_sell.get('risk_per_share', 0):.2f}")
+                lines.append(f"  Potential Profit (Target 1): ${buy_sell.get('potential_profit_1', 0):.2f}")
+                lines.append(f"  Potential Profit (Target 2): ${buy_sell.get('potential_profit_2', 0):.2f}")
                 lines.append("")
             
             # Checklist summary
@@ -448,28 +573,88 @@ def generate_detailed_report(results: List[Dict], output_file: Optional[Path] = 
                     lines.append(f"{status} PART {criteria_names.index((key, name)) + 1}: {name}")
                     lines.append("=" * 100)
                     
-                    description = criterion.get("description", "")
-                    if description:
-                        lines.append(f"Description: {description}")
+                    # Show KPI values from details
+                    details = criterion.get("details", {})
+                    if details:
+                        lines.append("[KPIs]")
+                        
+                        if key == "trend_structure":
+                            # Trend & Structure KPIs
+                            # Get last trading date for context
+                            last_trade_date = ""
+                            if data_date_range and data_date_range.get('end'):
+                                end_date = data_date_range.get('end')
+                                if 'T' in str(end_date):
+                                    last_trade_date = f" (as of {str(end_date).split('T')[0]})"
+                            lines.append(f"  Last Close Price{last_trade_date}: ${details.get('current_price', 0):.2f}")
+                            lines.append(f"  SMA 50: ${details.get('sma_50', 0):.2f} | Above: {'✓' if details.get('above_50') else '✗'}")
+                            lines.append(f"  SMA 150: ${details.get('sma_150', 0):.2f} | Above: {'✓' if details.get('above_150') else '✗'}")
+                            lines.append(f"  SMA 200: ${details.get('sma_200', 0):.2f} | Above: {'✓' if details.get('above_200') else '✗'}")
+                            lines.append(f"  SMA Order (50>150>200): {'✓' if details.get('sma_order_correct') else '✗'}")
+                            lines.append(f"  52W High: ${details.get('52_week_high', 0):.2f}")
+                            lines.append(f"  52W Low: ${details.get('52_week_low', 0):.2f}")
+                            lines.append(f"  Price from 52W Low: {details.get('price_from_52w_low_pct', 0):.1f}% (need ≥30%)")
+                            lines.append(f"  Price from 52W High: {details.get('price_from_52w_high_pct', 0):.1f}% (need ≤15%)")
+                            
+                        elif key == "base_quality":
+                            # Base Quality KPIs
+                            lines.append(f"  Base Length: {details.get('base_length_weeks', 0):.1f} weeks (need 3-8 weeks)")
+                            lines.append(f"  Base Depth: {details.get('base_depth_pct', 0):.1f}% (need ≤25%, ≤15% is elite)")
+                            lines.append(f"  Base High: ${details.get('base_high', 0):.2f}")
+                            lines.append(f"  Base Low: ${details.get('base_low', 0):.2f}")
+                            lines.append(f"  Base Volatility: {details.get('base_volatility', 0):.4f}")
+                            lines.append(f"  Avg Volatility: {details.get('avg_volatility', 0):.4f}")
+                            lines.append(f"  Avg Close Position: {details.get('avg_close_position_pct', 0):.1f}% (need ≥50%)")
+                            lines.append(f"  Volume Contraction: {details.get('volume_contraction', 0):.2f}x (need <0.95x)")
+                            
+                        elif key == "relative_strength":
+                            # Relative Strength KPIs
+                            lines.append(f"  RSI(14): {details.get('rsi_14', 0):.1f} (need >60)")
+                            lines.append(f"  Relative Strength: {details.get('relative_strength', 0):.4f} (need >0)")
+                            lines.append(f"  RS Rating: {details.get('rs_rating', 0):.1f}")
+                            lines.append(f"  Stock Return: {details.get('stock_return', 0):.2%}")
+                            lines.append(f"  Benchmark Return: {details.get('benchmark_return', 0):.2%}")
+                            lines.append(f"  Outperforming: {'✓' if details.get('outperforming') else '✗'}")
+                            
+                        elif key == "volume_signature":
+                            # Volume Signature KPIs
+                            lines.append(f"  Base Avg Volume: {details.get('base_avg_volume', 0):,.0f}")
+                            lines.append(f"  Pre-Base Volume: {details.get('pre_base_volume', 0):,.0f}")
+                            lines.append(f"  Volume Contraction: {details.get('volume_contraction', 0):.2f}x (need <0.9x)")
+                            lines.append(f"  Recent Volume: {details.get('recent_volume', 0):,.0f}")
+                            lines.append(f"  Avg Volume (20d): {details.get('avg_volume_20d', 0):,.0f}")
+                            lines.append(f"  Volume Increase: {details.get('volume_increase', 0):.2f}x (need ≥1.4x for breakout)")
+                            lines.append(f"  In Breakout: {'✓' if details.get('in_breakout') else '✗'}")
+                            
+                        elif key == "breakout_rules":
+                            # Breakout Rules KPIs
+                            lines.append(f"  Pivot Price (Base High): ${details.get('pivot_price', 0):.2f}")
+                            # Get last trading date for context
+                            last_trade_date = ""
+                            if data_date_range and data_date_range.get('end'):
+                                end_date = data_date_range.get('end')
+                                if 'T' in str(end_date):
+                                    last_trade_date = f" (as of {str(end_date).split('T')[0]})"
+                            lines.append(f"  Last Close Price{last_trade_date}: ${details.get('current_price', 0):.2f}")
+                            if details.get('breakout_day_price'):
+                                lines.append(f"  Breakout Day Price: ${details.get('breakout_day_price', 0):.2f}")
+                            lines.append(f"  Clears Pivot (≥2% above): {'✓' if details.get('clears_pivot') else '✗'}")
+                            lines.append(f"  Close Position on Breakout: {details.get('close_position_pct', 0):.1f}% (need ≥70%)")
+                            lines.append(f"  Volume Ratio: {details.get('volume_ratio', 0):.2f}x (need ≥1.2x)")
+                            lines.append(f"  In Breakout: {'✓' if details.get('in_breakout') else '✗'}")
+                        
                         lines.append("")
                     
-                    # Show key checks
-                    checks = criterion.get("checks", [])
-                    if checks:
-                        for check in checks[:5]:  # Limit to first 5 checks
-                            check_name = check.get("name", "")
-                            check_passed = check.get("passed", False)
-                            check_mark = "✓" if check_passed else "✗"
-                            lines.append(f"  {check_mark} {check_name}")
+                    # Show failures/warnings
+                    failures = criterion.get("failures", [])
+                    if failures:
+                        lines.append("  Failures/Warnings:")
+                        for failure in failures:
+                            lines.append(f"    - {failure}")
+                        lines.append("")
                     else:
-                        # Show summary
-                        failures = criterion.get("failures", [])
-                        if failures:
-                            lines.append("  Failures:")
-                            for failure in failures[:3]:  # Limit to first 3 failures
-                                lines.append(f"    - {failure}")
-                    
-                    lines.append("")
+                        lines.append("  ✓ All criteria met")
+                        lines.append("")
             
             lines.append("")
     
