@@ -84,8 +84,9 @@ def fetch_stock_data(ticker: str, bot: TradingBot) -> Dict:
             logger.warning(f"Insufficient data for {ticker}: {len(hist)} rows")
             return {
                 "ticker": ticker,
-                "error": "Insufficient historical data",
-                "data_available": False
+                "error": f"Insufficient historical data ({len(hist)} rows, need ≥200)",
+                "data_available": False,
+                "fetched_at": datetime.now().isoformat()  # Track when we tried
             }
         
         # Get stock info
@@ -115,8 +116,50 @@ def fetch_stock_data(ticker: str, bot: TradingBot) -> Dict:
         return {
             "ticker": ticker,
             "error": str(e),
-            "data_available": False
+            "data_available": False,
+            "fetched_at": datetime.now().isoformat()  # Track when we tried
         }
+
+
+def fetch_stock_data_with_retry(ticker: str, bot: TradingBot, max_retries: int = 2) -> Dict:
+    """
+    Fetch stock data with retry logic
+    
+    Args:
+        ticker: Stock ticker symbol
+        bot: TradingBot instance
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        Dictionary with fetch results
+    """
+    import time
+    from logger_config import get_logger
+    retry_logger = get_logger(__name__)
+    
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            # Wait a bit before retry (exponential backoff)
+            wait_time = min(2 ** attempt, 10)  # Max 10 seconds
+            retry_logger.info(f"Retry attempt {attempt} for {ticker} after {wait_time}s...")
+            time.sleep(wait_time)
+        
+        result = fetch_stock_data(ticker, bot)
+        
+        if result.get("data_available", False):
+            return result
+        
+        last_error = result.get("error", "Unknown error")
+    
+    # All retries failed
+    return {
+        "ticker": ticker,
+        "error": f"{last_error} (after {max_retries + 1} attempts)",
+        "data_available": False,
+        "fetched_at": datetime.now().isoformat()
+    }
 
 
 def fetch_all_data(force_refresh: bool = False, benchmark: str = "^GDAXI"):
@@ -157,10 +200,18 @@ def fetch_all_data(force_refresh: bool = False, benchmark: str = "^GDAXI"):
                 print(f"[{i}/{total}] {ticker:12s} - Using cached data")
                 skipped += 1
                 continue
+            # If cached entry exists but has error, retry it (might be temporary issue)
+            elif cached_entry.get("error"):
+                print(f"[{i}/{total}] {ticker:12s} - Retrying (previous error: {cached_entry.get('error', 'Unknown')[:30]}...)")
+        # When forcing refresh, also retry stocks that previously failed
+        elif force_refresh and ticker in cached_stocks:
+            cached_entry = cached_stocks[ticker]
+            if cached_entry.get("error") and not cached_entry.get("data_available", False):
+                print(f"[{i}/{total}] {ticker:12s} - Force refresh (was failed: {cached_entry.get('error', 'Unknown')[:30]}...)")
         
-        # Fetch new data
+        # Fetch new data (with retry logic)
         print(f"[{i}/{total}] {ticker:12s} - Fetching...", end=" ", flush=True)
-        result = fetch_stock_data(ticker, bot)
+        result = fetch_stock_data_with_retry(ticker, bot)
         
         if result.get("data_available", False):
             cached_stocks[ticker] = result
