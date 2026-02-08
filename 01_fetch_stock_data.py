@@ -2,7 +2,6 @@
 Fetch and cache stock data from watchlist
 Stores historical data for all stocks to avoid repeated API calls
 """
-import json
 import sys
 import io
 import argparse
@@ -11,6 +10,8 @@ from datetime import datetime
 from typing import Dict, List
 from bot import TradingBot
 from logger_config import setup_logging, get_logger
+from cache_utils import load_cached_data, save_cached_data
+from config import CACHE_FILE
 
 # Fix Windows console encoding
 if sys.platform == 'win32':
@@ -20,8 +21,6 @@ if sys.platform == 'win32':
 # Set up logging
 setup_logging(log_level="INFO", log_to_file=True)
 logger = get_logger(__name__)
-
-CACHE_FILE = Path("data/cached_stock_data.json")
 
 
 def load_watchlist(file_path: str = "watchlist.txt") -> List[str]:
@@ -42,34 +41,6 @@ def load_watchlist(file_path: str = "watchlist.txt") -> List[str]:
     
     logger.info(f"Loaded {len(tickers)} tickers from {file_path}")
     return tickers
-
-
-def load_cached_data() -> Dict:
-    """Load cached stock data if it exists"""
-    if CACHE_FILE.exists():
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                logger.info(f"Loaded {len(data.get('stocks', {}))} stocks from cache")
-                return data
-        except Exception as e:
-            logger.warning(f"Error loading cache: {e}")
-            return {"stocks": {}, "metadata": {}}
-    return {"stocks": {}, "metadata": {}}
-
-
-def save_cached_data(data: Dict):
-    """Save stock data to cache file"""
-    # Ensure data directory exists
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, default=str)
-        logger.info(f"Saved {len(data.get('stocks', {}))} stocks to cache: {CACHE_FILE}")
-    except Exception as e:
-        logger.error(f"Error saving cache: {e}")
-        raise
 
 
 def fetch_stock_data(ticker: str, bot: TradingBot) -> Dict:
@@ -170,8 +141,10 @@ def fetch_all_data(force_refresh: bool = False, benchmark: str = "^GDAXI"):
         print("No tickers found in watchlist.txt")
         return
     
-    # Load existing cache
-    cached_data = load_cached_data() if not force_refresh else {"stocks": {}, "metadata": {}}
+    # Load existing cache (shared cache_utils returns None if missing)
+    cached_data = load_cached_data() or {"stocks": {}, "metadata": {}}
+    if not force_refresh and cached_data.get("stocks"):
+        logger.info(f"Loaded {len(cached_data['stocks'])} stocks from cache")
     cached_stocks = cached_data.get("stocks", {})
     
     # Initialize bot
@@ -233,9 +206,10 @@ def fetch_all_data(force_refresh: bool = False, benchmark: str = "^GDAXI"):
     }
     cached_data["stocks"] = cached_stocks
     
-    # Save cache
+    # Save cache (shared cache_utils)
     save_cached_data(cached_data)
-    
+    logger.info(f"Saved {len(cached_data.get('stocks', {}))} stocks to cache: {CACHE_FILE}")
+
     # Print summary
     print(f"\n{'='*80}")
     print(f"FETCHING COMPLETE")

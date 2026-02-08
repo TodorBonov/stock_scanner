@@ -19,23 +19,10 @@ env_file = Path(DEFAULT_ENV_PATH)
 if env_file.exists():
     load_dotenv(env_file)
 
-REPORTS_DIR = Path("reports")
+from config import REPORTS_DIR, SCAN_RESULTS_LATEST
+from cache_utils import load_cached_data
+
 REPORTS_DIR.mkdir(exist_ok=True)
-
-
-def load_cached_data() -> Dict:
-    """Load cached stock data"""
-    cache_file = Path("data/cached_stock_data.json")
-    if not cache_file.exists():
-        logger.error(f"Cache file not found: {cache_file}")
-        return None
-    
-    try:
-        with open(cache_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading cache: {e}")
-        return None
 
 
 def format_stock_data_for_chatgpt(stock_result: Dict) -> str:
@@ -51,6 +38,7 @@ def format_stock_data_for_chatgpt(stock_result: Dict) -> str:
     detailed = stock_result.get("detailed_analysis", {})
     checklist = stock_result.get("checklist", {})
     buy_sell = stock_result.get("buy_sell_prices", {})
+    stock_info = stock_result.get("stock_info", {})
     
     # Build formatted text
     lines = []
@@ -63,6 +51,56 @@ def format_stock_data_for_chatgpt(stock_result: Dict) -> str:
     elif grade == "A+":
         lines.append("*** NOTE: This stock is A+ grade. Please confirm all criteria are met. ***")
     
+    lines.append("")
+    
+    # Company/Fundamental Information
+    lines.append("COMPANY INFO:")
+    lines.append(f"  Sector: {stock_info.get('sector', 'N/A')}")
+    lines.append(f"  Industry: {stock_info.get('industry', 'N/A')}")
+    market_cap = stock_info.get('market_cap', 0)
+    if market_cap:
+        if market_cap >= 1e12:
+            mc_str = f"${market_cap/1e12:.2f}T"
+        elif market_cap >= 1e9:
+            mc_str = f"${market_cap/1e9:.2f}B"
+        elif market_cap >= 1e6:
+            mc_str = f"${market_cap/1e6:.2f}M"
+        else:
+            mc_str = f"${market_cap:,.0f}"
+        lines.append(f"  Market Cap: {mc_str}")
+    lines.append(f"  Beta: {stock_info.get('beta', 'N/A')}")
+    lines.append("")
+    
+    # Fundamental Metrics
+    lines.append("FUNDAMENTAL METRICS:")
+    earnings_growth = stock_info.get('earnings_growth')
+    if earnings_growth is not None:
+        lines.append(f"  Earnings Growth: {earnings_growth:.1f}%")
+    revenue_growth = stock_info.get('revenue_growth')
+    if revenue_growth is not None:
+        lines.append(f"  Revenue Growth: {revenue_growth:.1f}%")
+    profit_margins = stock_info.get('profit_margins')
+    if profit_margins is not None:
+        lines.append(f"  Profit Margins: {profit_margins:.1f}%")
+    roe = stock_info.get('return_on_equity')
+    if roe is not None:
+        lines.append(f"  Return on Equity (ROE): {roe:.1f}%")
+    de = stock_info.get('debt_to_equity')
+    if de is not None:
+        lines.append(f"  Debt to Equity: {de:.1f}")
+    lines.append("")
+    
+    # Valuation Metrics
+    lines.append("VALUATION METRICS:")
+    trailing_pe = stock_info.get('trailing_pe')
+    if trailing_pe is not None:
+        lines.append(f"  Trailing P/E: {trailing_pe:.1f}")
+    forward_pe = stock_info.get('forward_pe')
+    if forward_pe is not None:
+        lines.append(f"  Forward P/E: {forward_pe:.1f}")
+    div_yield = stock_info.get('dividend_yield')
+    if div_yield is not None:
+        lines.append(f"  Dividend Yield: {div_yield:.2f}%")
     lines.append("")
     
     # Price Information
@@ -80,12 +118,31 @@ def format_stock_data_for_chatgpt(stock_result: Dict) -> str:
         if buy_sell.get("pivot_price"):
             lines.append(f"  Pivot Price (Base High): ${buy_sell.get('pivot_price', 0):.2f}")
         lines.append(f"  Buy Price: ${buy_sell.get('buy_price', 0):.2f}")
-        lines.append(f"  Stop Loss: ${buy_sell.get('stop_loss', 0):.2f} ({buy_sell.get('stop_loss_pct', 0):.1f}%)")
+        lines.append(f"  Tight Stop Loss (7.5%): ${buy_sell.get('stop_loss', 0):.2f} ({buy_sell.get('stop_loss_pct', 0):.1f}%)")
         lines.append(f"  Profit Target 1: ${buy_sell.get('profit_target_1', 0):.2f} ({buy_sell.get('profit_target_1_pct', 0):.1f}%)")
         lines.append(f"  Profit Target 2: ${buy_sell.get('profit_target_2', 0):.2f} ({buy_sell.get('profit_target_2_pct', 0):.1f}%)")
         if buy_sell.get("risk_reward_ratio"):
             lines.append(f"  Risk/Reward Ratio: {buy_sell.get('risk_reward_ratio', 0):.2f}")
         lines.append("")
+    
+    # KEY SUPPORT LEVELS (for stop loss reference)
+    lines.append("KEY SUPPORT LEVELS:")
+    trend = checklist.get("trend_structure", {})
+    base = checklist.get("base_quality", {})
+    if trend.get("details"):
+        sma_200 = trend["details"].get("sma_200", 0)
+        sma_150 = trend["details"].get("sma_150", 0)
+        sma_50 = trend["details"].get("sma_50", 0)
+        lines.append(f"  SMA 50 (short-term support): ${sma_50:.2f}")
+        lines.append(f"  SMA 150 (intermediate support): ${sma_150:.2f}")
+        lines.append(f"  SMA 200 (major support): ${sma_200:.2f}")
+    if base.get("details"):
+        base_low = base["details"].get("base_low", 0)
+        base_high = base["details"].get("base_high", 0)
+        lines.append(f"  Current Base Low: ${base_low:.2f} (swing trade stop level)")
+        lines.append(f"  Current Base High (Pivot): ${base_high:.2f}")
+    lines.append(f"  52-Week Low: ${detailed.get('52_week_low', 0):.2f} (disaster stop reference)")
+    lines.append("")
     
     # PART 1: Trend & Structure
     trend = checklist.get("trend_structure", {})
@@ -180,13 +237,26 @@ def create_chatgpt_prompt(stocks_data: List[str]) -> str:
 
 Analyze the following stocks that have been graded A+ or A by an automated Minervini scanner.
 
-## FIRST: TOP 3 PICKS SUMMARY
-Before the detailed analysis, start with a brief "TOP 3 PICKS" section that highlights your top 3 stock recommendations from the list. For each pick, provide:
-- Ticker and company name
-- Why it's your top pick (1-2 sentences)
-- Suggested entry price and stop loss
+## FIRST: TOP 10 PICKS - DETAILED SUMMARY
+Start with a comprehensive "TOP 10 PICKS" section that highlights your top 10 stock recommendations from the list, ranked by quality. For each pick, provide:
 
-## THEN: For each stock, provide detailed analysis:
+| Rank | Ticker | Company | Why It's a Top Pick | Entry Price | Stop Loss (Tight) | Stop Loss (Base Low) | Target 1 | Risk/Reward |
+|------|--------|---------|---------------------|-------------|-------------------|----------------------|----------|-------------|
+
+For each of your TOP 10 picks, also provide a brief narrative (3-4 sentences) explaining:
+- The quality of the current base pattern and its characteristics
+- The last strong support level (previous base low or key moving average) that could serve as an alternative stop loss
+- Why this stock stands out from the others
+- Any upcoming catalysts or concerns to watch
+
+### STOP LOSS STRATEGIES FOR TOP 10:
+For each top pick, suggest TWO stop loss levels:
+1. **Tight Stop**: 5% below pivot price (for aggressive traders)
+2. **Base Low Stop**: At or slightly below the base low (for swing traders who want more room)
+
+Also identify the **Last Strong Base** support level - this is the low of the previous consolidation before the current base, which can serve as a disaster stop.
+
+## THEN: For each stock in the full list, provide detailed analysis:
 
 1. **Overall Assessment**: Do you agree with the grade? Why or why not?
 2. **A+ vs A Analysis**: 
@@ -199,9 +269,14 @@ Before the detailed analysis, start with a brief "TOP 3 PICKS" section that high
 7. **Breakout Validation**: Is the stock breaking out properly?
 8. **Risk Assessment**: What are the key risks for this stock?
 9. **Recommendation**: Would you take a position? If yes, what size (Full/Half/None)?
-10. What is the pivot price?
-11. What is the buy price?
-12. What is the stop loss?
+10. **Entry/Exit Levels**:
+    - Pivot Price (base high)
+    - Buy Price (entry zone)
+    - Tight Stop Loss (5% below entry)
+    - Base Low Stop Loss (below base low)
+    - Last Strong Base / Support Level (for disaster stop reference)
+    - Profit Target 1 (10% gain)
+    - Profit Target 2 (45% gain)
 
 IMPORTANT: For stocks graded A (not A+), you MUST clearly explain what specific criteria failures or issues prevent them from being A+ grade. Reference the detailed checklist data provided for each stock.
 
@@ -244,7 +319,7 @@ def send_to_chatgpt(prompt: str, api_key: str, model: str = "gpt-5.2", timeout: 
                 }
             ],
             temperature=0.3,  # Lower temperature for more consistent analysis
-            max_tokens=16000  # Allow for detailed analysis (GPT-4o supports up to 16k tokens)
+            max_completion_tokens=16000  # Allow for detailed analysis (GPT-5.2 uses max_completion_tokens)
         )
         
         return response.choices[0].message.content
@@ -258,20 +333,40 @@ def send_to_chatgpt(prompt: str, api_key: str, model: str = "gpt-5.2", timeout: 
         return None
 
 
+def load_scan_results_from_file() -> Optional[List[Dict]]:
+    """
+    Load scan results from the latest saved file (written by 02_generate_full_report.py).
+    Returns None if file is missing or invalid.
+    """
+    if not SCAN_RESULTS_LATEST.exists():
+        return None
+    try:
+        with open(SCAN_RESULTS_LATEST, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list) and len(data) > 0:
+            return data
+        return None
+    except Exception as e:
+        logger.warning(f"Could not load scan results from {SCAN_RESULTS_LATEST}: {e}")
+        return None
+
+
 def get_scan_results() -> List[Dict]:
     """
-    Get scan results - either from existing scan or run new scan
+    Get scan results - load from latest report file if available, otherwise run full scan.
     """
-    # Try to load from most recent detailed report's scan
-    # For now, we'll run a fresh scan on A and B stocks
-    # In production, you might want to load from a saved scan results file
-    
+    results = load_scan_results_from_file()
+    if results is not None:
+        logger.info(f"Loaded {len(results)} scan results from {SCAN_RESULTS_LATEST}")
+        print(f"[INFO] Loaded {len(results)} results from report (no re-scan).")
+        return results
+
+    # Fallback: run full Minervini scan
     cached_data = load_cached_data()
     if not cached_data:
         logger.error("No cached data available. Please run 01_fetch_stock_data.py first.")
         return []
     
-    # Import scan function using importlib (can't use regular import for files starting with numbers)
     import importlib.util
     report_module_path = Path("02_generate_full_report.py")
     spec = importlib.util.spec_from_file_location("generate_full_report", report_module_path)

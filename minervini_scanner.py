@@ -865,8 +865,8 @@ class MinerviniScanner:
         Calculate buy and sell prices based on Minervini methodology
         
         Buy Price: Pivot point (base high) - this is the entry point
-        Stop Loss: 7-8% below buy price (Minervini's rule)
-        Profit Target 1: 20-25% above buy price (take partial profits)
+        Stop Loss: 5% below buy price (max loss; 2:1 R/R with 10% target)
+        Profit Target 1: 10% above buy price (take partial profits)
         Profit Target 2: 40-50% above buy price (let winners run, trail stop)
         
         Returns:

@@ -25,25 +25,30 @@ if sys.platform == 'win32':
 setup_logging(log_level="INFO", log_to_file=True)
 logger = get_logger(__name__)
 
-CACHE_FILE = Path("data/cached_stock_data.json")
-REPORTS_DIR = Path("reports")
+from config import CACHE_FILE, REPORTS_DIR, SCAN_RESULTS_LATEST
+from cache_utils import load_cached_data
 
 
-def load_cached_data() -> Dict:
-    """Load cached stock data"""
-    if not CACHE_FILE.exists():
-        logger.error(f"Cache file not found: {CACHE_FILE}")
-        logger.error("Please run fetch_stock_data.py first to fetch and cache data")
-        return None
-    
-    try:
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        logger.info(f"Loaded {len(data.get('stocks', {}))} stocks from cache")
-        return data
-    except Exception as e:
-        logger.error(f"Error loading cache: {e}")
-        return None
+def sanitize_for_json(obj):
+    """Convert numpy/datetime types to JSON-serializable types."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    if hasattr(obj, "isoformat"):  # datetime, pd.Timestamp
+        return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    return str(obj)
 
 
 def convert_cached_data_to_dataframe(cached_stock: Dict) -> Optional[pd.DataFrame]:
@@ -59,7 +64,7 @@ def convert_cached_data_to_dataframe(cached_stock: Dict) -> Optional[pd.DataFram
         
         # Convert index back to datetime
         if "index" in hist_dict and hist_dict["index"]:
-            df.index = pd.to_datetime(hist_dict["index"])
+            df.index = pd.to_datetime(hist_dict["index"], utc=True)
         elif "Date" in df.columns:
             df.index = pd.to_datetime(df["Date"])
             df = df.drop("Date", axis=1)
@@ -67,7 +72,7 @@ def convert_cached_data_to_dataframe(cached_stock: Dict) -> Optional[pd.DataFram
             # Try to find date column
             for col in df.columns:
                 if 'date' in col.lower() or 'time' in col.lower():
-                    df.index = pd.to_datetime(df[col])
+                    df.index = pd.to_datetime(df[col], utc=True)
                     df = df.drop(col, axis=1)
                     break
         
@@ -225,6 +230,24 @@ def get_company_name(result: Dict) -> str:
     return company_name if company_name else "N/A"
 
 
+def actionability_sort_key(r: Dict) -> tuple:
+    """
+    Sort key for 'Best setups': tighter base, drier volume, closer to pivot, higher RS.
+    Lower key = better setup. Used only for A-grade (and A+) stocks.
+    """
+    bq = r.get("checklist", {}).get("base_quality", {}).get("details") or {}
+    buy_sell = r.get("buy_sell_prices") or {}
+    rs_details = r.get("checklist", {}).get("relative_strength", {}).get("details") or {}
+
+    base_depth = bq.get("base_depth_pct", 99.0)  # lower better
+    vol_contract = bq.get("volume_contraction", 2.0)  # lower better
+    dist_buy = buy_sell.get("distance_to_buy_pct")
+    dist_buy = abs(dist_buy) if dist_buy is not None else 999.0  # smaller better
+    rs_rating = rs_details.get("rs_rating", 0)  # higher better -> use -rs_rating
+
+    return (base_depth, vol_contract, dist_buy, -rs_rating)
+
+
 def generate_summary_report(results: List[Dict], output_file: Optional[Path] = None):
     """Generate summary report with grade distribution"""
     total = len(results)
@@ -272,7 +295,8 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
                     if 'T' in ts:
                         dt_str = ts.split('T')[0] + ' ' + ts.split('T')[1].split('.')[0].split('+')[0]
                         parsed_times.append(dt.strptime(dt_str[:19], '%Y-%m-%d %H:%M:%S'))
-                except:
+                except Exception as e:
+                    logger.debug("Could not parse data timestamp %s: %s", ts, e)
                     pass
             
             if parsed_times:
@@ -286,7 +310,8 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
                     days_old = (datetime.now() - newest_data.replace(tzinfo=None)).days
                     lines.append(f"  ⚠️  Warning: Data is {days_old} day(s) old - consider refreshing")
                 lines.append("")
-        except:
+        except Exception as e:
+            logger.debug("Data freshness section failed: %s", e)
             pass
     
     # Overall Statistics
@@ -396,8 +421,9 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
                         timestamp_str = f" | Data: {dt_str[:16]}"  # YYYY-MM-DD HH:MM
                     else:
                         timestamp_str = f" | Data: {data_timestamp[:16]}" if len(data_timestamp) > 16 else f" | Data: {data_timestamp}"
-                except:
-                    timestamp_str = f" | Data: {data_timestamp[:16]}" if len(data_timestamp) > 16 else f" | Data: {data_timestamp}"
+                except Exception as e:
+                    logger.debug("Timestamp format failed for %s: %s", data_timestamp, e)
+                    timestamp_str = f" | Data: {data_timestamp[:16]}" if data_timestamp and len(str(data_timestamp)) > 16 else f" | Data: {data_timestamp}"
             
             # Add buy/sell prices if available
             if buy_sell and buy_sell.get("pivot_price") is not None:
@@ -408,6 +434,51 @@ def generate_summary_report(results: List[Dict], output_file: Optional[Path] = N
                 lines.append(f"      Buy: ${buy_price:.2f} | Stop: ${stop_loss:.2f} | Target 1: ${profit_target_1:.2f}")
             else:
                 lines.append(f"  {i:2d}. {name_part} - {price_info}{timestamp_str}")
+    
+    # Best setups (A-grade): same A+ and A stocks, ranked by setup quality
+    best_setup_grades = ["A+", "A"]
+    best_setup_stocks = [
+        r for r in results
+        if "error" not in r and r.get("overall_grade") in best_setup_grades
+    ]
+    if best_setup_stocks:
+        best_setup_sorted = sorted(best_setup_stocks, key=actionability_sort_key)
+        lines.append("")
+        lines.append("📐 BEST SETUPS (A-grade by setup quality)")
+        lines.append("-" * 100)
+        lines.append("  Ranked by: base depth (tighter) → volume contraction (drier) → distance to pivot (closer) → RS rating (higher)")
+        lines.append("")
+        for i, stock in enumerate(best_setup_sorted, 1):
+            ticker = stock.get("ticker", "UNKNOWN")
+            company_name = get_company_name(stock)
+            buy_sell = stock.get("buy_sell_prices", {})
+            bq = stock.get("checklist", {}).get("base_quality", {}).get("details") or {}
+            rs_details = stock.get("checklist", {}).get("relative_strength", {}).get("details") or {}
+            if company_name and company_name != "N/A":
+                name_part = f"{ticker:12s} ({company_name[:40]})"
+            else:
+                name_part = f"{ticker:12s}"
+            # Setup metrics line
+            base_depth = bq.get("base_depth_pct")
+            vol_contract = bq.get("volume_contraction")
+            dist_buy = buy_sell.get("distance_to_buy_pct")
+            rs_rating = rs_details.get("rs_rating")
+            metrics = []
+            if base_depth is not None:
+                metrics.append(f"base {base_depth:.1f}%")
+            if vol_contract is not None:
+                metrics.append(f"vol {vol_contract:.2f}x")
+            if dist_buy is not None:
+                metrics.append(f"dist {dist_buy:.1f}%")
+            if rs_rating is not None:
+                metrics.append(f"RS {rs_rating:.0f}")
+            metrics_str = " | ".join(metrics) if metrics else ""
+            lines.append(f"  {i:2d}. {name_part}  [{metrics_str}]")
+            if buy_sell and buy_sell.get("pivot_price") is not None:
+                buy_price = buy_sell.get("buy_price", 0)
+                stop_loss = buy_sell.get("stop_loss", 0)
+                profit_target_1 = buy_sell.get("profit_target_1", 0)
+                lines.append(f"      Buy: ${buy_price:.2f} | Stop: ${stop_loss:.2f} | Target 1: ${profit_target_1:.2f}")
     
     lines.append("")
     lines.append("=" * 100)
@@ -495,7 +566,8 @@ def generate_detailed_report(results: List[Dict], output_file: Optional[Path] = 
                         timestamp_str = dt_str[:19]  # YYYY-MM-DD HH:MM:SS
                     else:
                         timestamp_str = data_timestamp
-                except:
+                except Exception as e:
+                    logger.debug("Data timestamp format failed: %s", e)
                     timestamp_str = data_timestamp
                 
                 lines.append("[DATA TIMESTAMP]")
@@ -716,12 +788,14 @@ def main():
         fetch_all_data(force_refresh=True, benchmark=args.benchmark)
         print()
     
-    # Load cached data
+    # Load cached data (shared cache_utils)
     cached_data = load_cached_data()
     if cached_data is None:
+        logger.error("Cache file not found or invalid. Run 01_fetch_stock_data.py first.")
         print("Error: Could not load cached data")
-        print("Please run: python fetch_stock_data.py")
+        print("Please run: python 01_fetch_stock_data.py")
         sys.exit(1)
+    logger.info(f"Loaded {len(cached_data.get('stocks', {}))} stocks from cache")
     
     # Scan all stocks
     results = scan_all_stocks_from_cache(
@@ -733,6 +807,16 @@ def main():
     if not results:
         print("No results to report")
         return
+    
+    # Save scan results for ChatGPT script (03) to load without re-scanning
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = sanitize_for_json(results)
+        with open(SCAN_RESULTS_LATEST, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=0, ensure_ascii=False)
+        logger.info(f"Scan results saved to {SCAN_RESULTS_LATEST}")
+    except Exception as e:
+        logger.warning(f"Could not save scan results for ChatGPT: {e}")
     
     # Generate timestamp for filenames
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

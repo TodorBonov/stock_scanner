@@ -1,0 +1,50 @@
+@echo off
+REM Full pipeline: fetch data, then report, ChatGPT validation, and position suggestions
+REM Runs: 01 -> 02 -> 03 -> 05 (no PowerShell required)
+
+echo ================================================================================
+echo FULL PIPELINE (Fetch + Report + ChatGPT + Position Suggestions)
+echo ================================================================================
+
+echo.
+echo [1/4] Fetching stock data (force refresh)...
+python 01_fetch_stock_data.py --refresh
+if errorlevel 1 (
+    echo [ERROR] Data fetch failed!
+    exit /b 1
+)
+
+echo.
+echo [2/4] Generating full report...
+python 02_generate_full_report.py
+if errorlevel 1 (
+    echo [ERROR] Report generation failed!
+    exit /b 1
+)
+
+echo.
+echo [3/4] Running ChatGPT validation...
+python 03_chatgpt_validation.py
+if errorlevel 1 (
+    echo [ERROR] ChatGPT validation failed!
+    exit /b 1
+)
+
+echo.
+echo [4/4] Running position suggestions...
+python 05_position_suggestions.py
+if errorlevel 1 (
+    echo [ERROR] Position suggestions failed!
+    exit /b 1
+)
+
+echo.
+echo ================================================================================
+echo [SUCCESS] Full pipeline completed!
+echo ================================================================================
+echo.
+echo Check the reports\ directory for:
+echo   - summary_report_*.txt
+echo   - detailed_report_*.txt
+echo   - summary_Chat_GPT.txt
+echo   - position_suggestions_*.txt

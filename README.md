@@ -48,50 +48,49 @@ Create a `.env` file in the project root (optional):
 ALPHA_VANTAGE_API_KEY=your_key_here
 ```
 
+## Quick Start
+
+Two pipelines are available:
+
+| Pipeline | Command | What it does |
+|----------|---------|--------------|
+| **Full** | `.\run_full_pipeline.ps1` | Fetches fresh data (01), then report (02), ChatGPT validation (03), position suggestions (05). |
+| **Latest data** | `.\run_latest_data_pipeline.ps1` | Uses existing cache only: report (02), ChatGPT (03), position suggestions (05). No fetch. |
+
+```powershell
+# Full pipeline (fetch + report + ChatGPT + position suggestions)
+.\run_full_pipeline.ps1
+# If you get "running scripts is disabled", use instead:
+.\run_full_pipeline.cmd
+
+# Latest-data pipeline (report + ChatGPT + position suggestions; requires existing cache)
+.\run_latest_data_pipeline.ps1
+```
+
 ## Usage
 
-### Scan a Single Stock
+### Pipelines (recommended)
+
+- **Full pipeline:** `01_fetch_stock_data.py` → `02_generate_full_report.py` → `03_chatgpt_validation.py` → `05_position_suggestions.py`. Run via `.\run_full_pipeline.ps1`.
+- **Latest-data pipeline:** `02_generate_full_report.py` → `03_chatgpt_validation.py` → `05_position_suggestions.py`. Uses `data/cached_stock_data.json`; run via `.\run_latest_data_pipeline.ps1`.
+
+### Run individual steps
 
 ```bash
-python main.py scan AAPL
-```
+# 1. Fetch and cache data (watchlist.txt)
+python 01_fetch_stock_data.py
 
-Output as JSON:
-```bash
-python main.py scan AAPL --json
-```
+# 2. Generate Minervini report from cache
+python 02_generate_full_report.py
 
-### Scan Multiple Stocks
+# 3. ChatGPT validation (A-grade stocks)
+python 03_chatgpt_validation.py
 
-```bash
-python main.py scan-multi AAPL MSFT GOOGL TSLA
-```
+# 4. Retry failed fetches (optional)
+python 04_retry_failed_stocks.py
 
-### Search and Scan
-
-If you have Trading 212 API credentials:
-```bash
-python main.py search "Apple Inc" --use-trading212
-```
-
-### Change Benchmark Index
-
-For different European markets:
-```bash
-# DAX (Germany) - default
-python main.py --benchmark ^GDAXI scan AAPL
-
-# CAC 40 (France)
-python main.py --benchmark ^FCHI scan AAPL
-
-# AEX (Netherlands)
-python main.py --benchmark ^AEX scan AAPL
-
-# Swiss Market
-python main.py --benchmark ^SSMI scan AAPL
-
-# Nordics
-python main.py --benchmark ^OMX scan AAPL
+# 5. Position suggestions (Trading 212 positions + scan grades)
+python 05_position_suggestions.py
 ```
 
 ## Minervini SEPA Criteria Explained
@@ -181,12 +180,20 @@ Based on Minervini's methodology:
 
 ```
 .
-├── minervini_scanner.py  # Core Minervini SEPA scanner logic
-├── bot.py                # Main bot interface
-├── main.py               # CLI interface
-├── data_provider.py      # Data fetching (yfinance, Alpha Vantage)
-├── requirements.txt      # Python dependencies
-└── README.md            # This file
+├── 01_fetch_stock_data.py      # Fetch and cache data from watchlist
+├── 02_generate_full_report.py  # Minervini scan + summary/detailed reports
+├── 03_chatgpt_validation.py    # ChatGPT validation of A-grade stocks
+├── 04_retry_failed_stocks.py   # Retry failed fetches
+├── 05_position_suggestions.py  # Position suggestions (Trading 212 + scan grades)
+├── run_full_pipeline.ps1       # Full pipeline (01 → 02 → 03 → 05)
+├── run_latest_data_pipeline.ps1 # Latest-data pipeline (02 → 03 → 05)
+├── bot.py                      # Main bot interface
+├── minervini_scanner.py        # Core Minervini SEPA scanner logic
+├── data_provider.py            # Data fetching (yfinance, Alpha Vantage)
+├── config.py                   # Configuration and paths
+├── position_suggestions_config.py # Position suggestion rules
+├── requirements.txt            # Python dependencies
+└── README.md                   # This file
 ```
 
 ## Data Sources
@@ -232,10 +239,11 @@ Based on Minervini's methodology:
 
 2. **Export ticker list** from your screener
 
-3. **Scan with this tool**:
-   ```bash
-   python main.py scan-multi TICKER1 TICKER2 TICKER3
+3. **Run the pipeline** (after adding tickers to `watchlist.txt`):
+   ```powershell
+   .\run_full_pipeline.ps1
    ```
+   Or run individual steps: `01_fetch_stock_data.py`, then `02_generate_full_report.py`, etc.
 
 4. **Review A+ and A graded stocks** for potential entries
 
@@ -243,6 +251,41 @@ Based on Minervini's methodology:
    - First Entry: Buy pivot breakout (0.5-1% risk per trade)
    - First Add: Add if stock moves +2-3% from entry with volume confirmation
    - Second Add: Add if price respects 10 SMA, no wide red candles
+
+## Troubleshooting
+
+### "Running scripts is disabled" when running `.ps1`
+
+PowerShell’s execution policy is blocking scripts. You can either:
+
+- **Use the batch file** (no policy change): run `.\run_full_pipeline.cmd` instead of `.\run_full_pipeline.ps1`. It does the same thing.
+- **Allow scripts for your user** (one-time): in PowerShell run:
+  ```powershell
+  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+  ```
+  Then `.\run_full_pipeline.ps1` will work.
+
+### "Unauthorized" (401) when running the full pipeline
+
+The pipeline step **05_position_suggestions.py** calls the **Trading 212 API** to fetch your open positions. If you see `401 Unauthorized` or "Failed to fetch positions", the API is rejecting your credentials.
+
+**Common causes:**
+
+1. **Wrong or expired API key/secret**  
+   In Trading 212: **Invest** → **Settings** → **API** → create or regenerate your API key and secret. Copy both into `.env`:
+   ```
+   TRADING212_API_KEY=your_key_here
+   TRADING212_API_SECRET=your_secret_here
+   ```
+
+2. **Demo vs Live**  
+   This app uses the **Live** API (`live.trading212.com`). If your account or keys are for the **Demo** environment, the Live API will return 401. Use keys from your **Live** account.
+
+3. **`.env` not loaded**  
+   Run the script from the project root so that the `.env` file in that folder is found. The scripts load it automatically via `python-dotenv`.
+
+**To run the rest of the pipeline without Trading 212:**  
+Use the same steps but skip position suggestions: run `01_fetch_stock_data.py`, then `02_generate_full_report.py`, then `03_chatgpt_validation.py`. Step 05 is only needed for position suggestions based on your Trading 212 positions.
 
 ## License
 

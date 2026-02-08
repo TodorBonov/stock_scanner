@@ -2,44 +2,20 @@
 Retry Failed Stocks Script
 Re-attempts fetching data for stocks that previously failed
 """
-import json
+import importlib.util
 from pathlib import Path
 from datetime import datetime, timedelta
+
 from bot import TradingBot
-import importlib.util
+from config import CACHE_FILE
+from cache_utils import load_cached_data, save_cached_data
 
-# Import fetch functions
-fetch_module_path = Path("01_fetch_stock_data.py")
-spec = importlib.util.spec_from_file_location("fetch_stock_data", fetch_module_path)
-fetch_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fetch_module)
+# Load 01_fetch_stock_data to use fetch_stock_data (module name can't start with number, so use spec)
+_spec = importlib.util.spec_from_file_location("fetch_stock_data", Path(__file__).parent / "01_fetch_stock_data.py")
+fetch_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(fetch_module)
 
-CACHE_FILE = Path("data/cached_stock_data.json")
 MAX_RETRY_AGE_DAYS = 7  # Retry stocks that failed more than 7 days ago
-
-
-def load_cached_data():
-    """Load cached stock data"""
-    if not CACHE_FILE.exists():
-        return None
-    
-    try:
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading cache: {e}")
-        return None
-
-
-def save_cached_data(data):
-    """Save cached stock data"""
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Error saving cache: {e}")
-        raise
 
 
 def get_failed_stocks(cached_data, retry_old_errors=True):
@@ -73,8 +49,9 @@ def get_failed_stocks(cached_data, retry_old_errors=True):
                     age_days = (datetime.now() - fetched_at.replace(tzinfo=None)).days
                     if age_days > MAX_RETRY_AGE_DAYS:
                         should_retry = True
-                except:
+                except Exception as e:
                     # Invalid timestamp - retry
+                    print(f"Warning: invalid fetched_at for {ticker}: {e}")
                     should_retry = True
             
             if should_retry or not fetched_at_str:

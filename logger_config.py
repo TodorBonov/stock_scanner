@@ -18,7 +18,9 @@ from config import (
 
 def setup_logging(log_level: str = "INFO", log_to_file: bool = True) -> logging.Logger:
     """
-    Set up logging configuration with both console and file handlers
+    Set up logging configuration with both console and file handlers.
+    Idempotent: if the trading212_bot logger already has handlers, skip adding again
+    (so scripts can be run in the same process without duplicate log lines).
     
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -27,14 +29,17 @@ def setup_logging(log_level: str = "INFO", log_to_file: bool = True) -> logging.
     Returns:
         Configured logger instance
     """
+    logger = logging.getLogger("trading212_bot")
+    if logger.handlers:
+        # Already configured (e.g. 02 run after 01 in same process)
+        return logger
+
     # Create logs directory if it doesn't exist
     if log_to_file:
         log_dir = Path(DEFAULT_LOG_DIR)
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / DEFAULT_LOG_FILE
-    
-    # Get root logger
-    logger = logging.getLogger("trading212_bot")
+
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     
     # Remove existing handlers to avoid duplicates

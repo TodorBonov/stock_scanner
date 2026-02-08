@@ -84,6 +84,19 @@ DEFAULT_LOG_FILE = "trading212_bot.log"
 # Used by: Logger configuration
 # Why important: Standardizes log file naming
 
+# Cache and report paths (shared by 01, 02, 03, 04)
+CACHE_FILE = Path("data/cached_stock_data.json")
+# Purpose: Path to cached stock data from 01_fetch_stock_data.py
+# Used by: 01, 02, 03, 04 and cache_utils
+
+REPORTS_DIR = Path("reports")
+# Purpose: Directory for summary/detailed reports and scan results
+# Used by: 02, 03
+
+SCAN_RESULTS_LATEST = REPORTS_DIR / "scan_results_latest.json"
+# Purpose: Latest scan results JSON (written by 02, read by 03, 05)
+# Used by: 02, 03, 05 (via position_suggestions_config for 05)
+
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -196,7 +209,7 @@ PRICE_FROM_52W_LOW_MIN_PCT = 30  # Minimum % above 52-week low
 # Why important: Stocks near 52W lows are in Stage 1 (base) or Stage 4 (decline), not Stage 2
 # Minervini's rule: Stock should be at least 30% above 52-week low
 
-PRICE_FROM_52W_HIGH_MAX_PCT = 15  # Maximum % below 52-week high
+PRICE_FROM_52W_HIGH_MAX_PCT = 25  # Maximum % below 52-week high
 # Purpose: Ensures stock is near recent highs (not too far extended)
 # Used by: Trend & Structure check
 # Why important: Stocks more than 15% below high may be in late Stage 2 or Stage 3
@@ -439,17 +452,15 @@ VOLUME_EXPANSION_MIN = 1.2  # Minimum volume expansion (was 1.4x, now 1.2x = 20%
 # Entry and exit price calculations based on Minervini's rules
 # These determine where to buy, where to set stops, and profit targets
 
-STOP_LOSS_PCT = 7.5  # Stop loss % below buy price (Minervini's 7-8% rule)
+STOP_LOSS_PCT = 5.0  # Stop loss % below buy price (5% max loss)
 # Purpose: Maximum loss per share before exiting position
 # Used by: Buy/Sell price calculation
-# Why important: Minervini's rule: Cut losses at 7-8% to preserve capital
-# Minervini's rule: Stop loss should be 7-8% below entry price
+# Why important: Cut losses at 5% to preserve capital (R/R 2:1 with 10% target)
 
-PROFIT_TARGET_1_PCT = 22.5  # First profit target % above entry (20-25% range)
+PROFIT_TARGET_1_PCT = 10.0  # First profit target % above entry (10% targeted win)
 # Purpose: First profit-taking level (take partial profits)
 # Used by: Buy/Sell price calculation
-# Why important: Lock in profits at 20-25% gain, reduce risk
-# Minervini's rule: Take partial profits at 20-25% gain
+# Why important: Target 10% gain for 2:1 risk/reward vs 5% stop
 
 PROFIT_TARGET_2_PCT = 45.0  # Second profit target % above entry (40-50% range)
 # Purpose: Second profit-taking level (let winners run)
