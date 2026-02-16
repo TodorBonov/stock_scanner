@@ -55,6 +55,7 @@ fetch_output.log
 data/
 scan_results*.json
 
-# Reports (generated files)
-reports/
+# Reports: ignore huge detailed reports only; summary/ChatGPT/position reports can be committed
+reports/detailed_report_*.txt
+reports/run_02_*.txt
 
