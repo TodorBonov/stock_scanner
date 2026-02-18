@@ -135,8 +135,8 @@ def load_chart_data_from_scan_results(tickers: list[str]) -> str:
     return "Chart/level data from scan (use for SEPA pivot/add and must-hold levels):\n\n" + "\n".join(lines)
 
 
-def send_to_chatgpt(prompt: str, api_key: str, *, model: str | None = None) -> str | None:
-    """Call OpenAI Chat Completions. Returns content or None on failure."""
+def send_to_chatgpt(prompt: str, api_key: str, *, model: str | None = None) -> tuple[str | None, dict | None]:
+    """Call OpenAI Chat Completions. Returns (content, usage_dict) or (None, None) on failure."""
     model = model or OPENAI_CHATGPT_MODEL
     last_error = None
     for attempt in range(OPENAI_CHATGPT_RETRY_ATTEMPTS):
@@ -164,7 +164,15 @@ def send_to_chatgpt(prompt: str, api_key: str, *, model: str | None = None) -> s
                 temperature=0.3,
                 max_completion_tokens=min(OPENAI_CHATGPT_MAX_COMPLETION_TOKENS, 8000),
             )
-            return response.choices[0].message.content
+            usage = None
+            if getattr(response, "usage", None) is not None:
+                u = response.usage
+                usage = {
+                    "prompt_tokens": getattr(u, "prompt_tokens", None),
+                    "completion_tokens": getattr(u, "completion_tokens", None),
+                    "total_tokens": getattr(u, "total_tokens", None),
+                }
+            return response.choices[0].message.content, usage
         except Exception as e:
             last_error = e
             logger.warning("ChatGPT API attempt %s failed: %s", attempt + 1, e)
@@ -176,13 +184,13 @@ def send_to_chatgpt(prompt: str, api_key: str, *, model: str | None = None) -> s
                     time.sleep(wait)
             elif "insufficient_quota" in str(e).lower():
                 logger.error("Insufficient API quota. Check your OpenAI account.")
-                return None
+                return None, None
             elif attempt < OPENAI_CHATGPT_RETRY_ATTEMPTS - 1:
                 wait = OPENAI_CHATGPT_RETRY_BASE_SECONDS * (attempt + 1)
                 import time
                 time.sleep(wait)
     logger.error("ChatGPT API failed after %s attempts: %s", OPENAI_CHATGPT_RETRY_ATTEMPTS, last_error)
-    return None
+    return None, None
 
 
 def main() -> None:
@@ -254,7 +262,7 @@ def main() -> None:
             print(f"[WARN] Extra file not found: {args.extra}")
 
     model = args.model or OPENAI_CHATGPT_MODEL
-    analysis = send_to_chatgpt(prompt, api_key, model=model)
+    analysis, usage = send_to_chatgpt(prompt, api_key, model=model)
     if not analysis:
         print("[ERROR] Failed to get response from ChatGPT. Check API key and quota.")
         return
@@ -270,12 +278,20 @@ def main() -> None:
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Model: {model}",
         f"Input: {latest.name}",
+    ]
+    if usage and (usage.get("total_tokens") is not None or usage.get("prompt_tokens") is not None):
+        pt, ct, tot = usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens")
+        if tot is not None:
+            header.append(f"Tokens used: {tot:,} total (prompt: {pt or 0:,}, completion: {ct or 0:,})")
+        else:
+            header.append(f"Tokens used: prompt {pt or 0:,}, completion {ct or 0:,}")
+    header.extend([
         "",
         "=" * 80,
         "CHATGPT RECOMMENDATIONS",
         "=" * 80,
         "",
-    ]
+    ])
     body = "\n".join(header) + analysis.strip() + "\n"
 
     for path in (out_latest, out_ts):

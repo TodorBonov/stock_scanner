@@ -41,7 +41,7 @@ OPENAI_API_TIMEOUT = 60  # seconds for OpenAI API calls
 
 # ChatGPT validation (03_chatgpt_validation.py)
 OPENAI_CHATGPT_MODEL = "gpt-5.2"  # Model for validation (e.g. gpt-5.2, gpt-5, gpt-4o)
-OPENAI_CHATGPT_MAX_COMPLETION_TOKENS = 32000  # Allow long analysis for many stocks
+OPENAI_CHATGPT_MAX_COMPLETION_TOKENS = 64000  # Allow long analysis for many stocks (increase if output is truncated)
 OPENAI_CHATGPT_MAX_A_GRADE_STOCKS = 9999  # Max A+ and A stocks in one prompt (9999 = send all)
 OPENAI_CHATGPT_MAX_PRE_BREAKOUT_STOCKS = 9999  # Max pre-breakout setups in one prompt (9999 = send all)
 OPENAI_CHATGPT_INCLUDE_FULL_SCAN_DATA = False  # If False, report omits duplicate "ORIGINAL SCAN DATA" block (smaller file)

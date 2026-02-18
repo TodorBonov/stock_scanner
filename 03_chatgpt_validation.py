@@ -373,9 +373,10 @@ def send_to_chatgpt(
     model: Optional[str] = None,
     timeout: Optional[int] = None,
     max_completion_tokens: Optional[int] = None,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[dict]]:
     """
     Send prompt to ChatGPT and get response. Retries on rate limit / transient errors with backoff.
+    Returns (content, usage_dict). usage_dict has prompt_tokens, completion_tokens, total_tokens if available.
     """
     model = model or OPENAI_CHATGPT_MODEL
     request_timeout = timeout or OPENAI_API_TIMEOUT
@@ -402,7 +403,15 @@ def send_to_chatgpt(
                 temperature=0.3,
                 max_completion_tokens=max_tokens,
             )
-            return response.choices[0].message.content
+            usage = None
+            if getattr(response, "usage", None) is not None:
+                u = response.usage
+                usage = {
+                    "prompt_tokens": getattr(u, "prompt_tokens", None),
+                    "completion_tokens": getattr(u, "completion_tokens", None),
+                    "total_tokens": getattr(u, "total_tokens", None),
+                }
+            return response.choices[0].message.content, usage
         except Exception as e:
             last_error = e
             logger.warning(f"ChatGPT API attempt {attempt + 1} failed: {e}")
@@ -414,14 +423,14 @@ def send_to_chatgpt(
                     time.sleep(wait)
             elif "insufficient_quota" in str(e).lower():
                 logger.error("Insufficient API quota. Please check your OpenAI account.")
-                return None
+                return None, None
             elif attempt < OPENAI_CHATGPT_RETRY_ATTEMPTS - 1:
                 wait = OPENAI_CHATGPT_RETRY_BASE_SECONDS * (attempt + 1)
                 logger.info(f"Transient error. Waiting {wait}s before retry...")
                 import time
                 time.sleep(wait)
     logger.error(f"ChatGPT API failed after {OPENAI_CHATGPT_RETRY_ATTEMPTS} attempts: {last_error}")
-    return None
+    return None, None
 
 
 def load_scan_results_from_file() -> Optional[List[Dict]]:
@@ -549,19 +558,13 @@ def main():
 
     if estimated_tokens > 100000:
         print(f"\n[WARNING] Prompt is very long ({estimated_tokens:,.0f} tokens)")
-        if sys.stdin.isatty():
-            response = input("   Continue anyway? (y/n): ")
-            if response.lower() != 'y':
-                print("   Cancelled")
-                return
-        else:
-            print("   Proceeding (non-interactive).")
+        print("   Proceeding (use --max-a and --max-prebreakout to reduce size if needed).")
 
     model = args.model or OPENAI_CHATGPT_MODEL
     print(f"\n[INFO] Sending to ChatGPT (model: {model})...")
     if estimated_tokens > 10000:
         print(f"   (Large request: ~{estimated_tokens:,.0f} tokens - may take several minutes...)")
-    analysis = send_to_chatgpt(prompt, api_key, model=model)
+    analysis, usage = send_to_chatgpt(prompt, api_key, model=model)
 
     if not analysis:
         print("[ERROR] Failed to get analysis from ChatGPT. Check API key and quota.")
@@ -577,6 +580,12 @@ def main():
     report_lines.append("="*100)
     report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report_lines.append(f"Model: {model}")
+    if usage and (usage.get("total_tokens") is not None or usage.get("prompt_tokens") is not None):
+        pt, ct, tot = usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens")
+        if tot is not None:
+            report_lines.append(f"Tokens used: {tot:,} total (prompt: {pt or 0:,}, completion: {ct or 0:,})")
+        else:
+            report_lines.append(f"Tokens used: prompt {pt or 0:,}, completion {ct or 0:,}")
     scan_date = get_scan_date_from_latest_report()
     if scan_date:
         report_lines.append(f"Scan date (data as of): {scan_date}")
